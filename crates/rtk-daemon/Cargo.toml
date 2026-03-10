@@ -1,0 +1,28 @@
+[package]
+name = "rtk-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Unix socket daemon for RTK"
+
+[[bin]]
+name = "opencode-rtk"
+path = "src/main.rs"
+
+[dependencies]
+rtk-core = { path = "../rtk-core" }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

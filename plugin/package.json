@@ -1,0 +1,25 @@
+{
+  "name": "opencode-rtk-plugin",
+  "version": "0.1.0",
+  "description": "OpenCode plugin for RTK token optimization",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "opencode",
+    "rtk",
+    "token-optimization"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "bun-types": "latest"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "latest"
+  }
+}

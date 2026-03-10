@@ -1,0 +1,29 @@
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# RTK
+*.db
+*.db-journal
+*.sock
+
+# Node
+node_modules/
+dist/
+*.log
+
+# Test
+test-results/
+coverage/
