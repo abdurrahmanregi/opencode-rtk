@@ -163,20 +163,28 @@ opencode-rtk-cli stats
 
 ### 4. TypeScript Plugin
 
-OpenCode plugin that integrates with daemon.
+OpenCode plugin that integrates with daemon. Includes auto-start daemon management.
 
 **Structure:**
 ```
 plugin/
 ├── src/
-│   ├── index.ts                  # Plugin entry
+│   ├── index.ts                  # Plugin entry with auto-start
 │   ├── client.ts                 # RTKDaemonClient
+│   ├── spawn.ts                 # Daemon spawn and management
 │   ├── hooks/
 │   │   ├── tool-before.ts
 │   │   ├── tool-after.ts
 │   │   └── session.ts
 │   └── types.ts
 ```
+
+**Auto-Start Flow:**
+1. Plugin loads → checks if daemon is running
+2. If not running → spawns daemon process
+3. Waits for health check with exponential backoff
+4. Logs success or failure
+5. Handles cleanup on timeout
 
 ---
 
@@ -185,32 +193,37 @@ plugin/
 ### Request Lifecycle
 
 ```
+0. OpenCode loads plugin
+    └─ Plugin checks if daemon is running
+    └─ If not: spawns daemon, waits for health check
+    └─ Startup with race condition protection
+
 1. OpenCode calls bash tool
-   └─ tool.execute.before hook fires
+    └─ tool.execute.before hook fires
 
 2. Plugin detects command
-   └─ Check if command is supported (git, npm, etc.)
-   └─ Store command context
+    └─ Check if command is supported (git, npm, etc.)
+    └─ Store command context
 
 3. Bash executes
-   └─ Raw output captured
+    └─ Raw output captured
 
 4. tool.execute.after hook fires
-   └─ Plugin sends to RTK daemon via Unix socket
-   └─ JSON-RPC request: { method: "compress", params: {...} }
+    └─ Plugin sends to RTK daemon via Unix socket (or TCP on Windows)
+    └─ JSON-RPC request: { method: "compress", params: {...} }
 
 5. RTK daemon processes
-   └─ Parse JSON-RPC request
-   └─ Route to compress handler
-   └─ Detect command type
-   └─ Select filtering strategy
-   └─ Apply compression
-   └─ Track token savings in SQLite
-   └─ Return compressed output
+    └─ Parse JSON-RPC request
+    └─ Route to compress handler
+    └─ Detect command type
+    └─ Select filtering strategy
+    └─ Apply compression
+    └─ Track token savings in SQLite
+    └─ Return compressed output
 
 6. Plugin receives response
-   └─ Replace output with compressed version
-   └─ LLM sees compressed output
+    └─ Replace output with compressed version
+    └─ LLM sees compressed output
 
 Total latency: <5ms
 ```
@@ -462,6 +475,35 @@ pub fn track(
 
 ## Plugin Integration
 
+### Auto-Start Daemon Management
+
+The plugin automatically starts the daemon when loaded:
+
+```typescript
+// On plugin initialization
+export const RTKPlugin: Plugin = async ({ directory, worktree }) => {
+  const client = new RTKDaemonClient(RTK_SOCKET_PATH);
+  
+  // Check if daemon is already running
+  let isHealthy = await isDaemonRunning(client);
+  
+  if (!isHealthy) {
+    // Auto-start with race condition protection
+    if (startPromise) {
+      // Another initialization is starting daemon, wait for it
+      isHealthy = await startPromise;
+    } else {
+      // Start daemon with health check
+      startPromise = autoStartDaemon(RTK_BINARY, client);
+      isHealthy = await startPromise;
+      startPromise = null; // Clear when done
+    }
+  }
+  
+  // Rest of plugin...
+}
+```
+
 ### Plugin Hooks
 
 ```typescript
@@ -516,58 +558,67 @@ event: async ({ event }) => {
 }
 ```
 
-### RTKDaemonClient
+### RTKDaemonClient (Enhanced)
 
 ```typescript
 export class RTKDaemonClient {
   private socketPath: string;
   private connection: net.Socket | null = null;
   private requestId = 0;
+  private isTcp: boolean;
   
-  async compress(request: CompressRequest): Promise<string> {
+  constructor(socketPath: string = "/tmp/opencode-rtk.sock") {
+    this.socketPath = socketPath;
+    this.isTcp = socketPath.includes(':'); // TCP address
+  }
+  
+  async compress(request: CompressRequest): Promise<CompressResponse> {
     const response = await this.call("compress", request);
-    return response.compressed;
+    return response as CompressResponse;
   }
   
   async health(): Promise<boolean> {
     try {
-      const response = await this.call("health", {});
-      return response.status === "ok";
+      const result = await Promise.race([
+        client.health(),
+        new Promise<boolean>((_, reject) => 
+          setTimeout(() => reject(new Error('Health check timeout')), 5000)
+        )
+      ]);
+      return result;
     } catch {
       return false;
     }
   }
   
-  private async call(method: string, params: any): Promise<any> {
+  private async call(method: string, params: unknown): Promise<unknown> {
     const socket = await this.connect();
-    
-    const request = {
-      jsonrpc: "2.0",
-      id: ++this.requestId,
-      method,
-      params,
-    };
     
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
+        this.connection?.destroy();
+        this.connection = null;
         reject(new Error("Request timeout"));
       }, 5000);
       
-      socket.write(JSON.stringify(request));
+      const request = {
+        jsonrpc: "2.0",
+        id: ++this.requestId,
+        method,
+        params,
+      };
       
-      socket.once("data", (data) => {
+      socket.write(JSON.stringify(request) + "\n");
+      
+      socket.on("data", (data: Buffer) => {
         clearTimeout(timeout);
-        
-        try {
-          const response = JSON.parse(data.toString());
-          if (response.error) {
-            reject(new Error(response.error.message));
-          } else {
-            resolve(response.result);
-          }
-        } catch (error) {
-          reject(error);
-        }
+        // Handle JSON-RPC response...
+      });
+      
+      socket.once("error", (error) => {
+        clearTimeout(timeout);
+        this.connection = null;
+        reject(error);
       });
     });
   }
@@ -578,16 +629,109 @@ export class RTKDaemonClient {
     }
     
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection(this.socketPath);
+      const errorHandler = (error: Error) => {
+        this.connection = null;
+        reject(error);
+      };
       
-      socket.once("connect", () => {
+      const connectHandler = () => {
         this.connection = socket;
+        socket.off('error', errorHandler);
         resolve(socket);
-      });
+      };
       
-      socket.once("error", reject);
+      let socket: net.Socket;
+      
+      if (this.isTcp) {
+        const [host, portStr] = this.socketPath.split(":");
+        const port = parseInt(portStr, 10);
+        socket = net.createConnection(port, host);
+      } else {
+        socket = net.createConnection(this.socketPath);
+      }
+      
+      socket.once('error', errorHandler); // Attach first
+      socket.once('connect', connectHandler);
+      socket.once('close', () => {
+        this.connection = null;
+      });
     });
   }
+}
+```
+
+### Daemon Spawning
+
+```typescript
+// Spawn daemon with platform-specific options
+export function spawnDaemon(binaryPath: string): DaemonSpawnResult {
+  const isWindows = os.platform() === "win32";
+  
+  let child: cp.ChildProcess;
+  const spawnOptions: cp.SpawnOptions = {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: isWindows,
+  };
+  
+  if (isWindows) {
+    child = cp.spawn(binaryPath, [], spawnOptions);
+  } else {
+    child = cp.spawn(binaryPath, [], spawnOptions);
+    child.unref(); // Allow parent to exit
+  }
+  
+  // Attach event listeners for cleanup
+  child.on('error', (error) => {
+    console.error(`[RTK] Daemon failed to start: ${error.message}`);
+  });
+  
+  return { process: child, success: true };
+}
+
+// Auto-start with health check
+export async function autoStartDaemon(
+  binaryPath: string,
+  client: RTKDaemonClient
+): Promise<boolean> {
+  console.log(`[RTK] Daemon not running, starting '${binaryPath}'...`);
+  
+  const result = spawnDaemon(binaryPath);
+  if (!result.success) {
+    return false;
+  }
+  
+  const started = await waitForDaemon(client);
+  
+  if (started) {
+    console.log("[RTK] Daemon started successfully");
+    return true;
+  } else {
+    console.warn("[RTK] Daemon start timeout, killing spawned process");
+    await killProcess(result.process!);
+    return false;
+  }
+}
+
+// Wait for daemon to become healthy with exponential backoff
+export async function waitForDaemon(
+  client: RTKDaemonClient,
+  maxAttempts: number = 15,
+  initialDelayMs: number = 200
+): Promise<boolean> {
+  for (let i = 0; i < maxAttempts; i++) {
+    const isHealthy = await isDaemonRunning(client);
+    if (isHealthy) {
+      return true;
+    }
+    
+    // Exponential backoff with jitter
+    const backoff = Math.min(initialDelayMs * Math.pow(1.5, i), 2000);
+    const jitter = Math.random() * 50;
+    await new Promise(resolve => setTimeout(resolve, backoff + jitter));
+  }
+  
+  return false;
 }
 ```
 

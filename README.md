@@ -65,48 +65,33 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ## Quick Start
 
-### Step 1: Build the Daemon
+### Step 1: Build the Daemon and Plugin
 
 ```bash
+# Build Rust daemon
 cargo build --release
-```
 
-### Step 2: Start the Daemon
-
-```bash
-# Run in a terminal (keep it running)
-cargo run --release --bin opencode-rtk
-```
-
-You should see:
-```
-INFO rtk_daemon: Daemon started on /tmp/opencode-rtk.sock (Unix)
-# or on Windows:
-INFO rtk_daemon: Daemon started on 127.0.0.1:9876 (TCP)
-```
-
-### Step 3: Build the Plugin
-
-```bash
-# Requires bun (npm also works)
+# Build TypeScript plugin
 cd plugin
 bun install
 bun run build
 ```
 
-### Step 4: Configure OpenCode
+### Step 2: Configure OpenCode
 
 Add to your project's `opencode.json`:
 
 ```json
 {
-  "plugin": ["./path/to/opencode-rtk/plugin/src/index.ts"]
+  "plugin": ["C:/Users/abdur/OneDrive/Work/opencode-rtk/plugin/src/index.ts"]
 }
 ```
 
-### Step 5: Use OpenCode Normally
+### Step 3: Use OpenCode Normally
 
-The plugin will automatically compress command output!
+The plugin will **automatically start the daemon** and compress command output!
+
+**Note:** The daemon auto-starts when OpenCode loads. No manual startup needed.
 
 ## Supported Commands
 
@@ -130,19 +115,24 @@ The plugin will automatically compress command output!
 │   OpenCode  │────▶│   Plugin    │────▶│ RTK Daemon  │
 │   (Go CLI)  │     │ (TypeScript)│     │   (Rust)    │
 └─────────────┘     └─────────────┘     └─────────────┘
-                                               │
-                                               ▼
-                                        ┌─────────────┐
-                                        │ Compressed  │
-                                        │   Output    │
-                                        └─────────────┘
+                        │                      │
+                        │ Auto-start           │ Unix/TCP
+                        └──────▶──────────────▶
+                              Spawned process
+                                                │
+                                                ▼
+                                         ┌─────────────┐
+                                         │ Compressed  │
+                                         │   Output    │
+                                         └─────────────┘
 ```
 
-1. You run a command in OpenCode
-2. Plugin captures the output
-3. Sends to RTK daemon via socket
-4. Daemon compresses based on command type
-5. Compressed output goes to LLM
+1. OpenCode loads plugin → Plugin auto-starts daemon if not running
+2. You run a command in OpenCode
+3. Plugin captures the output
+4. Sends to RTK daemon via socket
+5. Daemon compresses based on command type
+6. Compressed output goes to LLM
 
 ## Project Structure
 
@@ -243,22 +233,45 @@ retention_days = 90       # Delete old records after 90 days
 
 ## Troubleshooting
 
-### "Cannot connect to daemon"
-
-Make sure the daemon is running:
-```bash
-cargo run --bin opencode-rtk
-```
-
 ### "Plugin not compressing"
 
-1. Check daemon is running
-2. Check plugin path in `opencode.json` is correct
-3. Rebuild plugin: `cd plugin && bun run build`
+1. Check plugin path in `opencode.json` is correct
+2. Rebuild plugin: `cd plugin && bun run build`
+3. Check for errors in console - daemon auto-starts on plugin load
+4. On Windows, verify port 9876 is not in use: `netstat -an | findstr 9876`
+
+### "Daemon failed to start"
+
+1. Verify `opencode-rtk` binary is in PATH or use full path
+2. Check logs for specific error messages
+3. On Windows: Run daemon manually to see startup errors
+4. On Unix: Check permissions on `/tmp/opencode-rtk.sock`
 
 ### "Build fails"
 
 Make sure you have Rust installed:
+```bash
+rustc --version
+cargo --version
+```
+
+### "nul or NUL files created in project"
+
+If you see `nul` or `NUL` files appearing in your project directory, this is a Git Bash + Windows issue.
+
+**Cause:** Running `command 2>nul` in Git Bash creates files instead of redirecting to Windows null device.
+
+**Solution:**
+```bash
+# Delete the files (Windows del may fail)
+rm -f ./nul ./NUL
+
+# Use /dev/null instead of nul in bash
+# ❌ Bad: command 2>nul
+# ✅ Good: command 2>/dev/null
+```
+
+## License
 ```bash
 rustc --version
 cargo --version

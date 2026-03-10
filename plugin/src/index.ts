@@ -4,12 +4,16 @@ import { onToolExecuteBefore } from "./hooks/tool-before";
 import { onToolExecuteAfter } from "./hooks/tool-after";
 import { onSessionIdle } from "./hooks/session";
 import { startCleanupTimer } from "./state";
+import { isDaemonRunning, autoStartDaemon } from "./spawn";
 
 import * as os from "os";
 
+let startPromise: Promise<boolean> | null = null;
+let isStarting = false;
+
 const isWindows = os.platform() === "win32";
 const RTK_SOCKET_PATH = isWindows ? "127.0.0.1:9876" : "/tmp/opencode-rtk.sock";
-const RTK_BINARY = "opencode-rtk";
+const RTK_BINARY = isWindows ? "opencode-rtk.exe" : "opencode-rtk";
 
 export const RTKPlugin: Plugin = async ({ directory, worktree }) => {
   const client = new RTKDaemonClient(RTK_SOCKET_PATH);
@@ -17,12 +21,32 @@ export const RTKPlugin: Plugin = async ({ directory, worktree }) => {
   // Start periodic cleanup of expired pending commands
   startCleanupTimer();
   
-  // Check if daemon is running
-  const isHealthy = await client.health();
+  // Auto-start daemon if not running, with promise-based lock to prevent race conditions
+  let isHealthy = await isDaemonRunning(client);
   
   if (!isHealthy) {
-    console.warn("RTK daemon is not running. Token optimization disabled.");
-    console.warn(`Start daemon with: ${RTK_BINARY}`);
+    if (startPromise || isStarting) {
+      console.log("[RTK] Waiting for existing daemon startup...");
+      if (startPromise) {
+        isHealthy = await startPromise;
+      }
+    } else {
+      isStarting = true;
+      startPromise = (async () => {
+        console.log(`[RTK] Daemon not running, starting '${RTK_BINARY}'...`);
+        return await autoStartDaemon(RTK_BINARY, client);
+      })();
+      
+      isHealthy = await startPromise;
+      
+      // Only reset flags after successful startup
+      if (isHealthy) {
+        startPromise = null;
+        isStarting = false;
+      }
+    }
+  } else {
+    console.log("[RTK] Daemon already running");
   }
   
   return {

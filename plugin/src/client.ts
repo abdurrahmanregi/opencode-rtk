@@ -76,107 +76,114 @@ export class RTKDaemonClient {
    * - Added proper data buffering for incomplete chunks
    * - Handles newline-delimited JSON protocol
    */
-  private async call(method: string, params: unknown): Promise<unknown> {
-    // Connect first (outside Promise to avoid async in executor)
-    const socket = await this.connect();
-    
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("Request timeout"));
-        this.connection?.destroy();
-      }, 5000);
-      
-      const request = {
-        jsonrpc: "2.0",
-        id: ++this.requestId,
-        method,
-        params,
-      };
-      
-      // Buffer for incomplete data chunks
-      let buffer = "";
-      
-      const onData = (data: Buffer): void => {
-        buffer += data.toString();
-        
-        // Try to find complete JSON messages (newline-delimited)
-        // The daemon should send responses terminated with newline
-        const lines = buffer.split("\n");
-        
-        // Keep the last incomplete line in buffer
-        buffer = lines.pop() || "";
-        
-        for (const line of lines) {
-          if (!line.trim()) {
-            continue; // Skip empty lines
-          }
-          
-          try {
-            const response = JSON.parse(line);
-            
-            clearTimeout(timeout);
-            socket.off("data", onData);
-            socket.off("error", onError);
-            
-            if (response.error) {
-              reject(new Error(response.error.message || "Unknown error"));
-            } else {
-              resolve(response.result);
-            }
-            return; // Only process first complete response
-          } catch (parseError) {
-            // If we can't parse, maybe incomplete - continue buffering
-            // Log for debugging but don't reject yet
-            console.warn("RTK: Failed to parse response chunk:", parseError);
-          }
-        }
-      };
-      
-      const onError = (error: Error): void => {
-        clearTimeout(timeout);
-        socket.off("data", onData);
-        reject(error);
-      };
-      
-      socket.on("data", onData);
-      socket.once("error", onError);
-      
-      // Send request with newline terminator for newline-delimited JSON
-      socket.write(JSON.stringify(request) + "\n");
-    });
-  }
+   private async call(method: string, params: unknown): Promise<unknown> {
+     // Connect first (outside Promise to avoid async in executor)
+     const socket = await this.connect();
+     
+     return new Promise((resolve, reject) => {
+       const timeout = setTimeout(() => {
+         reject(new Error("Request timeout"));
+         socket.destroy();
+         this.connection = null;
+       }, 5000);
+       
+       const request = {
+         jsonrpc: "2.0",
+         id: ++this.requestId,
+         method,
+         params,
+       };
+       
+       // Buffer for incomplete data chunks
+       let buffer = "";
+       
+       const onData = (data: Buffer): void => {
+         buffer += data.toString();
+         
+         // Try to find complete JSON messages (newline-delimited)
+         // The daemon should send responses terminated with newline
+         const lines = buffer.split("\n");
+         
+         // Keep the last incomplete line in buffer
+         buffer = lines.pop() || "";
+         
+         for (const line of lines) {
+           if (!line.trim()) {
+             continue; // Skip empty lines
+           }
+           
+           try {
+             const response = JSON.parse(line);
+             
+             clearTimeout(timeout);
+             socket.off("data", onData);
+             socket.off("error", onError);
+             
+             if (response.error) {
+               reject(new Error(response.error.message || "Unknown error"));
+             } else {
+               resolve(response.result);
+             }
+             return; // Only process first complete response
+           } catch (parseError) {
+             // If we can't parse, maybe incomplete - continue buffering
+             // Log for debugging but don't reject yet
+             console.warn("RTK: Failed to parse response chunk:", parseError);
+           }
+         }
+       };
+       
+       const onError = (error: Error): void => {
+         clearTimeout(timeout);
+         this.connection = null;
+         socket.off("data", onData);
+         reject(error);
+       };
+       
+       socket.on("data", onData);
+       socket.once("error", onError);
+       
+       // Send request with newline terminator for newline-delimited JSON
+       socket.write(JSON.stringify(request) + "\n");
+     });
+   }
   
-  private async connect(): Promise<net.Socket> {
-    if (this.connection && !this.connection.destroyed) {
-      return this.connection;
-    }
-    
-    return new Promise((resolve, reject) => {
-      let socket: net.Socket;
-      
-      if (this.isTcp) {
-        const [host, portStr] = this.socketPath.split(":");
-        const port = parseInt(portStr, 10);
-        socket = net.createConnection(port, host);
-      } else {
-        socket = net.createConnection(this.socketPath);
-      }
-      
-      socket.once("connect", () => {
-        this.connection = socket;
-        resolve(socket);
-      });
-      
-      socket.once("error", (error) => {
-        this.connection = null;
-        reject(error);
-      });
-      
-      socket.once("close", () => {
-        this.connection = null;
-      });
-    });
-  }
+   private async connect(): Promise<net.Socket> {
+     if (this.connection && !this.connection.destroyed) {
+       return this.connection;
+     }
+     
+     return new Promise((resolve, reject) => {
+       let socket: net.Socket;
+       
+       if (this.isTcp) {
+         const [host, portStr] = this.socketPath.split(":");
+         const port = parseInt(portStr, 10);
+         socket = net.createConnection(port, host);
+       } else {
+         socket = net.createConnection(this.socketPath);
+       }
+       
+       // Attach error handler BEFORE connect to handle immediate failures
+       const errorHandler = (error: Error) => {
+         this.connection = null;
+         reject(error);
+       };
+       
+       const connectHandler = () => {
+         this.connection = socket;
+         socket.off("error", errorHandler);
+         resolve(socket);
+       };
+       
+       socket.once("error", errorHandler);
+       socket.once("connect", connectHandler);
+       
+       socket.once("close", () => {
+         this.connection = null;
+       });
+     });
+   }
   
   disconnect(): void {
     if (this.connection) {

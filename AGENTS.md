@@ -380,6 +380,7 @@ async fn test_daemon_health() {
 
 ### File Organization
 
+**Rust:**
 ```
 crates/rtk-core/src/
 ├── lib.rs              # Public API exports
@@ -398,7 +399,129 @@ crates/rtk-core/src/
     └── tokens.rs       # Token estimation
 ```
 
+**TypeScript Plugin:**
+```
+plugin/src/
+├── index.ts                  # Plugin entry with auto-start daemon
+├── client.ts                 # RTKDaemonClient (TCP/Unix socket)
+├── spawn.ts                 # Daemon spawn and lifecycle management
+├── state.ts                 # Plugin state (pending commands, cleanup)
+├── hooks/
+│   ├── tool-before.ts         # Pre-tool execution hook
+│   ├── tool-after.ts         # Post-tool execution hook
+│   └── session.ts           # Session idle hook
+└── types.ts                 # TypeScript interfaces
+```
+
 ## Common Patterns
+
+### TypeScript Plugin Auto-Start Pattern
+
+```typescript
+// Auto-start daemon with race condition protection
+let startPromise: Promise<boolean> | null = null;
+let isStarting = false;
+
+export const RTKPlugin: Plugin = async ({ directory, worktree }) => {
+  const client = new RTKDaemonClient(RTK_SOCKET_PATH);
+  
+  // Check if daemon is already running
+  let isHealthy = await isDaemonRunning(client);
+  
+  if (!isHealthy) {
+    // Use promise-based lock to prevent concurrent spawns
+    if (startPromise || isStarting) {
+      console.log("[RTK] Waiting for existing daemon startup...");
+      isHealthy = await startPromise!;
+    } else {
+      isStarting = true;
+      startPromise = (async () => {
+        try {
+          console.log(`[RTK] Daemon not running, starting '${RTK_BINARY}'...`);
+          return await autoStartDaemon(RTK_BINARY, client);
+        } finally {
+          isStarting = false;
+        }
+      })();
+      
+      isHealthy = await startPromise;
+      startPromise = null;
+    }
+  }
+  
+  if (isHealthy) {
+    console.log("[RTK] Daemon is running");
+  } else {
+    console.error("[RTK] Failed to start daemon after multiple attempts");
+  }
+  
+  // Return plugin hooks...
+};
+```
+
+### Daemon Spawn Pattern
+
+```typescript
+// Platform-aware daemon spawning
+export function spawnDaemon(binaryPath: string): DaemonSpawnResult {
+  const isWindows = os.platform() === "win32";
+  
+  let child: cp.ChildProcess;
+  const spawnOptions: cp.SpawnOptions = {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: isWindows,
+  };
+  
+  try {
+    if (isWindows) {
+      child = cp.spawn(binaryPath, [], spawnOptions);
+    } else {
+      child = cp.spawn(binaryPath, [], spawnOptions);
+      child.unref(); // Allow parent to exit
+    }
+    
+    // Attach event listeners for async errors
+    child.on('error', (error) => {
+      console.error(`[RTK] Daemon failed to start: ${error.message}`);
+    });
+    
+    return { process: child, success: true };
+  } catch (error) {
+    return {
+      process: null,
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+```
+
+### Health Check with Exponential Backoff
+
+```typescript
+export async function waitForDaemon(
+  client: RTKDaemonClient,
+  maxAttempts: number = 15,
+  initialDelayMs: number = 200
+): Promise<boolean> {
+  for (let i = 0; i < maxAttempts; i++) {
+    const isHealthy = await isDaemonRunning(client);
+    if (isHealthy) {
+      return true;
+    }
+    
+    // Exponential backoff with jitter (prevents thundering herd)
+    const backoff = Math.min(initialDelayMs * Math.pow(1.5, i), 2000);
+    const jitter = Math.random() * 50;
+    const delay = backoff + jitter;
+    
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+  
+  return false;
+}
+```
 
 ### Command Module Pattern
 
@@ -481,6 +604,32 @@ cargo test -- --nocapture
 # Check specific crate
 cargo check -p rtk-core
 ```
+
+## Windows-Specific Issues
+
+### Git Bash and `nul` File Creation
+
+When running commands in Git Bash on Windows, using `2>nul` for null redirection creates actual files named `nul` or `NUL` instead of redirecting to the Windows null device.
+
+**Problem:**
+```bash
+# ❌ BAD in Git Bash - creates files named nul and NUL
+dir ... 2>nul
+```
+
+**Solution:**
+```bash
+# ✅ GOOD in Git Bash - redirects to /dev/null
+dir ... 2>/dev/null
+```
+
+**If `nul` or `NUL` files are created:**
+```bash
+# Delete them using rm (Windows del may fail due to reserved name)
+rm -f ./nul ./NUL
+```
+
+**Why this happens:** Git Bash on Windows doesn't recognize Windows device names (`nul`, `NUL`, `CON`, etc.) as special, so it treats them as regular filenames. Windows `del` command fails because these are reserved device names, but `rm` in Git Bash works around this limitation.
 
 ## Pre-Commit Checklist
 
