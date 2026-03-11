@@ -321,6 +321,181 @@ if (error instanceof Error) {
 }
 ```
 
+## OpenCode-RTK Workflow
+
+### Architecture Overview
+
+OpenCode-RTK uses a **hybrid optimization approach** combining pre-execution flag injection and post-execution filtering for maximum token savings.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    HYBRID OPTIMIZATION FLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. PRE-EXECUTION (tool.execute.before):                                       │
+│     • Detect command type (git, npm, cargo, etc.)                          │
+│     • Apply optimization flags (--json, --quiet, --porcelain)                  │
+│     • Store original command in context                                          │
+│     • Modify output.args.command for execution                                    │
+│                                                                             │
+│  2. EXECUTION:                                                                │
+│     • Command runs with optimized flags → smaller output                       │
+│                                                                             │
+│  3. POST-EXECUTION (tool.execute.after):                                        │
+│     • Capture optimized output                                                │
+│     • Send to RTK daemon for compression                                     │
+│     • Replace with compressed version (80%+ reduction)                        │
+│     • Track token savings in SQLite                                         │
+│                                                                             │
+│  4. OPTIONAL: TEE MODE                                                          │
+│     • On compression failure, save full output to file                         │
+│     • File path: ~/.local/share/opencode-rtk/tee/<timestamp>_<cmd>.log     │
+│     • LLM can read original if needed                                        │
+│                                                                             │
+│  SAVINGS: Pre-execution flags (50%) + Post-execution filter (80%) = 90% total  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Differences from Original RTK
+
+| Aspect                  | Original RTK (Claude Code) | OpenCode-RTK (OpenCode)     |
+| ----------------------- | ----------------------------- | ------------------------------ |
+| **Integration**           | Claude Code hooks            | OpenCode plugin API              |
+| **When to intercept**   | BEFORE execution (rewrite)     | BOTH: before (flags) + after (filter) |
+| **Communication**       | Direct CLI spawn             | Persistent daemon via socket       |
+| **Process model**       | Per-command process         | Single daemon process            |
+| **Platform**            | Unix-focused                | Cross-platform (Unix + Windows)  |
+| **Language**            | Rust only                   | Rust daemon + TypeScript plugin  |
+| **Command optimization** | None                        | Pre-execution flag injection      |
+| **Tee mode**           | Built-in                    | Planned (Phase 3.5)           |
+
+### Pre-Execution Flag Optimizations
+
+**Why this approach:** Original RTK authors chose to prepend `rtk` to commands (e.g., `rtk git status`) because it provides command interception capability via shell hooks. Our approach achieves the same optimization (adding flags) but uses OpenCode's plugin API instead of shell hooks.
+
+**Current flag mappings (hardcoded):**
+
+```rust
+// crates/rtk-core/src/commands/pre_execution.rs
+
+pub const FLAG_MAPPINGS: &[(&str, &[&str])] = &[
+    // Git
+    ("git status", &["--porcelain", "-b"]),
+    ("git diff", &["--stat"]),  // fallback to full diff if < 100 lines
+    ("git log", &["--oneline"]),
+    ("git add", &[]),  // No flags (silent by default)
+    ("git commit", &[]),  // No flags (silent by default)
+    ("git push", &["--quiet"]),  // Filter progress
+    ("git branch", &[]),
+    ("git checkout", &[]),
+    
+    // npm/yarn/pnpm
+    ("npm test", &["--silent"]),
+    ("npm install", &["--silent", "--no-progress"]),
+    ("yarn test", &["--silent"]),
+    ("pnpm test", &["--silent"]),
+    ("pnpm install", &["--silent"]),
+    
+    // Cargo
+    ("cargo build", &["--quiet"]),
+    ("cargo test", &["--quiet"]),
+    ("cargo clippy", &["--quiet"]),
+    
+    // Docker
+    ("docker ps", &["--format", "table {{.ID}}\\t{{.Names}}"]),
+    ("docker images", &["--format", "table {{.Repository}}\\t{{.Tag}}"]),
+    
+    // Test runners
+    ("pytest", &["-q"]),  // quiet
+    ("go test", &[]),  // Use -json only if verbose
+    
+    // Network tools
+    ("curl", &["-s"]),  // silent
+    ("wget", &["-q"]),  // quiet
+];
+```
+
+### DCP (Dynamic Context Pruning) Synergy
+
+**How RTK helps DCP:**
+- Smaller compressed messages = DCP can keep more turns in context
+- Example: Without RTK, session lasts ~15 turns before hitting 200k tokens
+- With RTK, session lasts ~75+ turns (5x improvement)
+- DCP can be less aggressive, preserving more context
+
+**DCP-aware optimizations:**
+- Use consistent output format across commands
+- Group related information (e.g., test results summary)
+- Minimize unique identifiers in output
+- Avoid redundant timestamps
+
+### Plugin Hooks Implementation (Hybrid)
+
+**tool.execute.before - Expanded:**
+```typescript
+export const onToolExecuteBefore = async (input, output) => {
+  if (input.tool === "bash") {
+    const command = output.args.command;
+    
+    // Detect command type and apply flags
+    const optimized = applyPreExecutionFlags(command);
+    
+    // Store context for post-execution hook
+    pendingCommands.set(input.callID, {
+      originalCommand: command,
+      optimizedCommand: optimized,
+      timestamp: Date.now(),
+    });
+    
+    // Modify command to be executed
+    output.args.command = optimized;
+  }
+};
+```
+
+**tool.execute.after - Unchanged:**
+```typescript
+export const onToolExecuteAfter = async (input, output) => {
+  if (input.tool === "bash") {
+    const context = pendingCommands.get(input.callID);
+    
+    if (context) {
+      try {
+        // Send to daemon for compression
+        const compressed = await rtkClient.compress({
+          command: context.optimizedCommand,
+          output: output.output,
+          context: { cwd, exit_code, tool },
+        });
+        
+        // Replace output if savings > 0
+        if (compressed.saved_tokens > 0) {
+          output.output = compressed.compressed;
+          // Add metadata for debugging
+          console.log(`[RTK] ${compressed.saved_tokens} tokens saved (${compressed.savings_pct}%)`);
+        }
+      } catch (error) {
+        console.error("[RTK] Compression failed, using original output");
+        // Fallback to original (already in output.output)
+      }
+    }
+    
+    pendingCommands.delete(input.callID);
+  }
+};
+```
+
+### When Working on OpenCode-RTK
+
+1. **Pre-execution flags** → Apply optimization in `tool.execute.before`
+2. **Post-execution compression** → Core daemon handles filtering
+3. **DCP-aware output** → Format for DCP compatibility
+4. **Tee mode** → Save original on failure (when implemented)
+5. **Memory efficiency** → Daemon uses <10MB steady state
+
+---
+
 ## Testing Patterns
 
 ### Rust Unit Tests
