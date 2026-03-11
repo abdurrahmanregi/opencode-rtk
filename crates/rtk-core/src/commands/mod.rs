@@ -15,6 +15,7 @@ pub mod npm_cmd;
 pub mod pip_cmd;
 pub mod playwright_cmd;
 pub mod pnpm_cmd;
+pub mod pre_execution;
 pub mod prisma_cmd;
 pub mod psql_cmd;
 pub mod pytest_cmd;
@@ -23,6 +24,8 @@ pub mod ruff_cmd;
 pub mod tsc_cmd;
 pub mod vitest_cmd;
 pub mod wget_cmd;
+
+pub use pre_execution::{optimize_command, FlagMapping, OptimizedCommand};
 
 use crate::Context;
 use anyhow::Result;

@@ -33,6 +33,78 @@ export interface HealthResponse {
 }
 
 /**
+ * Request for the optimize method
+ */
+export interface OptimizeRequest {
+  command: string;
+}
+
+/**
+ * Response from the optimize method
+ */
+export interface OptimizeResponse {
+  /** Original command string */
+  original: string;
+  /** Optimized command string with flags */
+  optimized: string;
+  /** Flags that were added */
+  flags_added: string[];
+  /** Whether optimization was skipped */
+  skipped: boolean;
+  /** Reason for skipping (if applicable) */
+  skip_reason?: string;
+}
+
+/**
+ * Request for tee_save method
+ */
+export interface TeeSaveRequest {
+  command: string;
+  output: string;
+}
+
+/**
+ * Response from tee_save method
+ */
+export interface TeeSaveResponse {
+  path: string;
+  size: number;
+}
+
+/**
+ * Response from tee_list method
+ */
+export interface TeeListResponse {
+  files: TeeFileInfo[];
+  total: number;
+}
+
+/**
+ * Information about a tee file
+ */
+export interface TeeFileInfo {
+  path: string;
+  command: string;
+  timestamp: string;
+  size: number;
+}
+
+/**
+ * Request for tee_read method
+ */
+export interface TeeReadRequest {
+  path: string;
+}
+
+/**
+ * Response from tee_read method
+ */
+export interface TeeReadResponse {
+  content: string;
+  size: number;
+}
+
+/**
  * Hook type definitions (extracted from @opencode-ai/plugin Hooks interface)
  */
 

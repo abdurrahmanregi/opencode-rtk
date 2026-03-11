@@ -34,9 +34,9 @@ cargo clean
 
 ```bash
 cd plugin
-bun install          # Install dependencies
-bun run build        # Compile TypeScript
-bun run dev          # Watch mode
+npm install          # Install dependencies
+npm run build        # Compile TypeScript
+# or: npx tsc
 ```
 
 ## Test Commands
@@ -71,8 +71,8 @@ cargo test --lib
 
 ```bash
 cd plugin
-bun test              # Run all tests
-bun test src/client.test.ts  # Run specific test file
+npm test              # Run all tests (if configured)
+npm run lint           # Run linter (if configured)
 ```
 
 ## Lint & Format
@@ -100,8 +100,8 @@ cargo clippy --fix
 
 ```bash
 cd plugin
-bun run lint           # Run linter (if configured)
-bun run format         # Format code (if configured)
+npm run lint           # Run linter (if configured)
+npm run format         # Format code (if configured)
 ```
 
 ## Code Style Guidelines
@@ -368,7 +368,7 @@ OpenCode-RTK uses a **hybrid optimization approach** combining pre-execution fla
 | **Platform**            | Unix-focused                | Cross-platform (Unix + Windows)  |
 | **Language**            | Rust only                   | Rust daemon + TypeScript plugin  |
 | **Command optimization** | None                        | Pre-execution flag injection      |
-| **Tee mode**           | Built-in                    | Planned (Phase 3.5)           |
+| **Tee mode**           | Built-in                    | Implemented (Phase 3.5)    |
 
 ### Pre-Execution Flag Optimizations
 
@@ -491,7 +491,7 @@ export const onToolExecuteAfter = async (input, output) => {
 1. **Pre-execution flags** → Apply optimization in `tool.execute.before`
 2. **Post-execution compression** → Core daemon handles filtering
 3. **DCP-aware output** → Format for DCP compatibility
-4. **Tee mode** → Save original on failure (when implemented)
+4. **Tee mode** → Save original on compression failure (Phase 3.5)
 5. **Memory efficiency** → Daemon uses <10MB steady state
 
 ---
@@ -821,5 +821,7 @@ Before committing:
 
 - **Architecture**: See `ARCHITECTURE.md` for system design
 - **Roadmap**: See `PLAN.md` for development phases
-- **Status**: See `PHASE1_SUMMARY.md` for current progress
+- **Phase 1**: See `PHASE1_SUMMARY.md` for core infrastructure
+- **Phase 2**: See `PHASE2_SUMMARY.md` for command modules
+- **Phase 3.5**: See `PHASE3_5_SUMMARY.md` for pre-execution and tee mode
 - **Next Steps**: See `NEXT_STEPS.md` for immediate tasks

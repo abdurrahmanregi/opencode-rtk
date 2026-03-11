@@ -12,6 +12,8 @@
 6. [Token Tracking](#token-tracking)
 7. [Plugin Integration](#plugin-integration)
 8. [Protocol Specification](#protocol-specification)
+9. [Pre-Execution Optimization](#pre-execution-optimization)
+10. [Tee Mode](#tee-mode)
 
 ---
 
@@ -837,3 +839,152 @@ All communication uses JSON-RPC 2.0 over Unix socket.
 3. **Custom Modules** - User-defined command modules via config
 4. **Real-time Dashboard** - Web UI for token savings analytics
 5. **Multi-Language Support** - Compression for non-English outputs
+
+---
+
+## Pre-Execution Optimization
+
+### Overview
+
+Pre-execution optimization injects flags into commands before they run, reducing output size at the source.
+
+### Flag Mappings
+
+```rust
+// crates/rtk-core/src/commands/pre_execution.rs
+
+pub const FLAG_MAPPINGS: &[(&str, &[&str])] = &[
+    // Git
+    ("git status", &["--porcelain", "-b"]),
+    ("git diff", &["--stat"]),
+    ("git log", &["--oneline"]),
+    ("git push", &["--quiet"]),
+    
+    // npm/yarn/pnpm
+    ("npm test", &["--silent"]),
+    ("npm install", &["--silent", "--no-progress"]),
+    ("yarn test", &["--silent"]),
+    ("pnpm test", &["--silent"]),
+    ("pnpm install", &["--silent"]),
+    
+    // Cargo
+    ("cargo build", &["--quiet"]),
+    ("cargo test", &["--quiet"]),
+    ("cargo clippy", &["--quiet"]),
+    
+    // Docker
+    ("docker ps", &["--format", "table {{.ID}}\t{{.Names}}"]),
+    ("docker images", &["--format", "table {{.Repository}}\t{{.Tag}}"]),
+    
+    // Test runners
+    ("pytest", &["-q"]),
+    
+    // Network tools
+    ("curl", &["-s"]),
+    ("wget", &["-q"]),
+];
+```
+
+### Skip Conditions
+
+Commands are skipped (not optimized) if they contain:
+- Pipe operators (`|`) — Complex pipeline handling
+- Heredocs (`<<`) — Multi-line input
+- Subshells (`$()` or backticks) — Nested command execution
+- OR operators (`||`) — Logical operators, not pipes
+
+### Plugin Integration
+
+```typescript
+// plugin/src/hooks/tool-before.ts
+
+export const onToolExecuteBefore = async (input, output, client) => {
+  if (input.tool === "bash") {
+    const command = output.args.command;
+    
+    // Get optimized command from daemon
+    const result = await client.optimizeCommand(command);
+    
+    if (!result.skipped) {
+      // Store context for post-execution
+      pendingCommands.set(input.callID, {
+        originalCommand: command,
+        optimizedCommand: result.optimized,
+        flagsAdded: result.flags_added,
+      });
+      
+      // Modify command to execute
+      output.args.command = result.optimized;
+    }
+  }
+};
+```
+
+---
+
+## Tee Mode
+
+### Overview
+
+Tee mode saves original command output to a file when compression fails, allowing the LLM to access the full output if needed.
+
+### File Storage
+
+```
+~/.local/share/opencode-rtk/tee/
+├── 2026-03-11_03-15-30_git_status.log
+├── 2026-03-11_03-16-45_npm_test.log
+└── ...
+```
+
+### Rotation Policy
+
+- **max_files**: Maximum number of tee files to keep (default: 100)
+- **retention_days**: Delete files older than N days (default: 7)
+
+### TeeManager API
+
+```rust
+pub struct TeeManager {
+    directory: PathBuf,
+    max_files: usize,
+    retention_days: u32,
+}
+
+impl TeeManager {
+    pub fn save(&self, command: &str, output: &str) -> Result<TeeEntry>;
+    pub fn list(&self) -> Result<Vec<TeeEntry>>;
+    pub fn read(&self, path: &Path) -> Result<String>;
+    pub fn delete(&self, path: &Path) -> Result<()>;
+    pub fn clear(&self) -> Result<usize>;
+    pub fn rotate(&self) -> Result<usize>;
+}
+```
+
+### Plugin Integration
+
+```typescript
+// plugin/src/hooks/tool-after.ts
+
+try {
+  const compressed = await client.compress(request);
+  output.output = compressed.compressed;
+} catch (error) {
+  console.error("RTK: Compression failed:", error);
+  
+  // Save original output to tee
+  try {
+    const teeResult = await client.saveTee(context.originalCommand, rawOutput);
+    console.error(`[RTK] Saved original output to: ${teeResult.path}`);
+  } catch (teeError) {
+    console.error("[RTK] Failed to save tee:", teeError);
+  }
+}
+```
+
+### Security
+
+Path traversal is prevented by:
+1. Canonicalizing both tee directory and requested path
+2. Verifying requested path starts with tee directory
+3. Rejecting paths that escape the tee directory

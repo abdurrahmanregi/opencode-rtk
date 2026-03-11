@@ -67,20 +67,39 @@ pub fn error_response(id: Option<Value>, code: i32, message: &str) -> Vec<u8> {
 
 pub async fn handle_request(request: Request, config: &rtk_core::config::Config) -> Vec<u8> {
     use crate::handlers;
-    
+
     // Validate JSON-RPC version (must be "2.0")
     if request.jsonrpc != "2.0" {
-        return error_response(request.id, INVALID_REQUEST, "Invalid JSON-RPC version (must be \"2.0\")");
+        return error_response(
+            request.id,
+            INVALID_REQUEST,
+            "Invalid JSON-RPC version (must be \"2.0\")",
+        );
     }
-    
+
     let result = match request.method.as_str() {
         "compress" => handlers::compress::handle(request.params, config).await,
         "health" => handlers::health::handle(request.params).await,
         "stats" => handlers::stats::handle(request.params).await,
         "shutdown" => handlers::shutdown::handle(request.params).await,
+        "optimize" => handlers::optimize::handle(request.params, config)
+            .await
+            .map_err(|e| (INTERNAL_ERROR, e.to_string())),
+        "tee_save" => handlers::tee::handle_save(request.params, config)
+            .await
+            .map_err(|e| (INTERNAL_ERROR, e.to_string())),
+        "tee_list" => handlers::tee::handle_list(request.params, config)
+            .await
+            .map_err(|e| (INTERNAL_ERROR, e.to_string())),
+        "tee_read" => handlers::tee::handle_read(request.params, config)
+            .await
+            .map_err(|e| (INTERNAL_ERROR, e.to_string())),
+        "tee_clear" => handlers::tee::handle_clear(request.params, config)
+            .await
+            .map_err(|e| (INTERNAL_ERROR, e.to_string())),
         _ => Err((METHOD_NOT_FOUND, "Method not found".to_string())),
     };
-    
+
     match result {
         Ok(value) => success_response(request.id, value),
         Err((code, message)) => error_response(request.id, code, &message),

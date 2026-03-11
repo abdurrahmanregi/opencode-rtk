@@ -67,9 +67,10 @@ $ git status --porcelain -b
 - 🛡️ **Process isolation** - RTK crash doesn't affect OpenCode
 - ⚡ **Low latency** - Unix socket (or TCP on Windows)
 - 📦 **26 command modules** - Git, npm, cargo, pytest, go, aws, and more
-- 🧪 **362 tests** - Well-tested and reliable
+- 🧪 **393 tests** - Well-tested and reliable
 - 🎯 **Hybrid optimization** - Pre-execution flags + post-execution filtering
 - 🔄 **DCP synergy** - Smaller messages = DCP keeps more context
+- 💾 **Tee mode** - Save original output on compression failure
 
 ## Installation
 
@@ -109,8 +110,8 @@ cargo build --release
 
 # Build TypeScript plugin
 cd plugin
-bun install
-bun run build
+npm install
+npm run build
 ```
 
 ### Step 2: Configure OpenCode
@@ -219,6 +220,7 @@ opencode-rtk/
 ├── plugin/            # TypeScript plugin for OpenCode
 ├── PHASE1_SUMMARY.md  # Phase 1 completion details
 ├── PHASE2_SUMMARY.md  # Phase 2 completion details
+├── PHASE3_5_SUMMARY.md # Phase 3.5 completion details
 ├── CODE_REVIEW_SUMMARY.md  # Code audit results
 ├── ARCHITECTURE.md    # System design
 └── AGENTS.md          # Build/test commands
@@ -296,13 +298,16 @@ retention_days = 90       # Delete old records after 90 days
 | Phase 1 | Core infrastructure | ✅ Complete |
 | Phase 2 | Command modules | ✅ Complete |
 | Code Review | Bug fixes | ✅ Complete |
-| Phase 3 | Polish & testing | 🔜 Next |
+| Phase 3.5 | Pre-execution + Tee mode | ✅ Complete |
+| Phase 4 | User-defined modules | 🔜 Next |
 
 ## Documentation
 
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** - How the system is designed
 - **[AGENTS.md](./AGENTS.md)** - Build commands and code style guide
-- **[PHASE2_SUMMARY.md](./PHASE2_SUMMARY.md)** - Module details
+- **[PHASE1_SUMMARY.md](./PHASE1_SUMMARY.md)** - Core infrastructure details
+- **[PHASE2_SUMMARY.md](./PHASE2_SUMMARY.md)** - Command module details
+- **[PHASE3_5_SUMMARY.md](./PHASE3_5_SUMMARY.md)** - Pre-execution and tee mode
 - **[CODE_REVIEW_SUMMARY.md](./CODE_REVIEW_SUMMARY.md)** - What was audited and fixed
 
 ## Troubleshooting
@@ -310,7 +315,7 @@ retention_days = 90       # Delete old records after 90 days
 ### "Plugin not compressing"
 
 1. Check plugin path in `opencode.json` is correct
-2. Rebuild plugin: `cd plugin && bun run build`
+2. Rebuild plugin: `cd plugin && npm run build`
 3. Check for errors in console - daemon auto-starts on plugin load
 4. On Windows, verify port 9876 is not in use: `netstat -an | findstr 9876`
 

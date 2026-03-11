@@ -1,8 +1,12 @@
 pub mod commands;
 pub mod config;
 pub mod filter;
+pub mod tee;
 pub mod tracking;
 pub mod utils;
+
+pub use commands::pre_execution::{optimize_command, FlagMapping, OptimizedCommand};
+pub use tee::{TeeEntry, TeeManager};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};

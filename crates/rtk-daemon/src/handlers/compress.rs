@@ -92,7 +92,7 @@ pub async fn handle(params: Value, _config: &rtk_core::config::Config) -> Handle
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rtk_core::config::{Config, DaemonConfig, GeneralConfig};
+    use rtk_core::config::{Config, DaemonConfig, GeneralConfig, TeeConfig};
 
     fn make_config(enable_tracking: bool) -> Config {
         Config {
@@ -102,6 +102,8 @@ mod tests {
                 retention_days: 90,
                 default_filter_level: "minimal".to_string(),
                 verbosity: 0,
+                enable_pre_execution_flags: true,
+                flag_mappings_path: None,
             },
             daemon: DaemonConfig {
                 socket_path: "/tmp/test.sock".to_string(),
@@ -110,6 +112,7 @@ mod tests {
                 auto_restart: false,
                 tcp_address: None,
             },
+            tee: TeeConfig::default(),
         }
     }
 
