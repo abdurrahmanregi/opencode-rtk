@@ -78,7 +78,7 @@ $ git status --porcelain -b
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourname/opencode-rtk
+git clone https://github.com/abdurrahmanregi/opencode-rtk
 cd opencode-rtk
 
 # Build (requires Rust installed)
