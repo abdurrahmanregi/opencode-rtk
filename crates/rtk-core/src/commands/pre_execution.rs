@@ -162,19 +162,6 @@ pub const FLAG_MAPPINGS: &[FlagMapping] = &[
         flags: &["--quiet"],
         condition: None,
     },
-    // === DOCKER ===
-    FlagMapping {
-        command: "docker",
-        subcommand: Some("ps"),
-        flags: &["--format", "table {{.ID}}\t{{.Names}}"],
-        condition: None,
-    },
-    FlagMapping {
-        command: "docker",
-        subcommand: Some("images"),
-        flags: &["--format", "table {{.Repository}}\t{{.Tag}}"],
-        condition: None,
-    },
     // === TEST RUNNERS ===
     FlagMapping {
         command: "pytest",
@@ -760,8 +747,8 @@ mod tests {
     #[test]
     fn test_optimize_docker_ps() {
         let result = optimize_command("docker ps").unwrap();
-        assert!(result.optimized.contains("--format"));
-        assert!(!result.skipped);
+        assert!(result.skipped);
+        assert_eq!(result.optimized, "docker ps");
     }
 
     #[test]
@@ -875,8 +862,16 @@ mod tests {
     #[test]
     fn test_optimize_docker_images() {
         let result = optimize_command("docker images").unwrap();
-        assert!(result.optimized.contains("--format"));
-        assert!(!result.skipped);
+        assert!(result.skipped);
+        assert_eq!(result.optimized, "docker images");
+    }
+
+    #[test]
+    fn test_optimize_docker_with_user_format_unchanged() {
+        let command = "docker ps --format '{{.ID}}'";
+        let result = optimize_command(command).unwrap();
+        assert!(result.skipped);
+        assert_eq!(result.optimized, command);
     }
 
     #[test]

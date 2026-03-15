@@ -29,7 +29,7 @@ pub struct GeneralConfig {
 }
 
 fn default_enable_pre_execution_flags() -> bool {
-    true
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,7 +256,7 @@ impl Default for Config {
                 retention_days: 90,
                 default_filter_level: "minimal".to_string(),
                 verbosity: 0,
-                enable_pre_execution_flags: true,
+                enable_pre_execution_flags: false,
                 flag_mappings_path: None,
             },
             daemon: DaemonConfig {
@@ -281,7 +281,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert!(config.general.enable_tracking);
-        assert!(config.general.enable_pre_execution_flags);
+        assert!(!config.general.enable_pre_execution_flags);
         assert!(config.tee.enabled);
         assert_eq!(config.tee.mode, "failures");
     }
@@ -324,7 +324,7 @@ mod tests {
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
-        assert!(config.general.enable_pre_execution_flags); // Should use default
+        assert!(!config.general.enable_pre_execution_flags); // Should use default
         assert!(config.tee.enabled); // Should use default
     }
 
