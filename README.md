@@ -18,13 +18,14 @@ while preserving fail-open behavior (original output remains usable if RTK is do
 ## Runtime Flow
 
 1. `tool.execute.before`
-   - plugin calls daemon `optimize`
-   - plugin rewrites command if flags are added
+   - plugin keeps original command by default
+   - optional rewrite mode (`RTK_ENABLE_PRE_EXECUTION_FLAGS=1`) calls daemon `optimize`
 2. command executes
 3. `tool.execute.after`
    - plugin ensures daemon health (with startup/restart path)
-   - plugin calls daemon `compress`
-   - plugin replaces output only when savings are positive
+   - plugin default mode is `metadata_only`: calls daemon `compress` but keeps visible output unchanged
+   - optional `replace_output` mode rewrites output only when savings are positive
+   - template/markdown-sensitive output is skipped to protect chat rendering
    - on compression failure, plugin can `tee_save` raw output
 4. `session.idle`
    - plugin calls `stats` and prints session-level savings
@@ -52,6 +53,8 @@ Environment variables:
 - `RTK_DAEMON_ADDR`: override daemon endpoint (socket path or TCP address)
 - `RTK_DAEMON_PATH`: override daemon binary path
 - `RTK_VERBOSE_STARTUP_LOGS=1`: enable verbose startup diagnostics in plugin spawn flow
+- `RTK_ENABLE_PRE_EXECUTION_FLAGS=1`: enable pre-exec command rewrite mode (default: off)
+- `RTK_POST_EXECUTION_MODE`: `off` | `metadata_only` (default) | `replace_output`
 
 ## JSON-RPC Methods
 
@@ -106,7 +109,7 @@ Primary config file:
 - `~/.config/opencode-rtk/config.toml`
 
 Key sections:
-- `[general]`: tracking and pre-execution toggles
+- `[general]`: tracking and pre-execution toggles (`enable_pre_execution_flags` now defaults to `false`)
 - `[daemon]`: socket path / TCP address / runtime limits
 - `[tee]`: tee save behavior and retention
 - `[llm]`: optional LLM fallback configuration (feature-dependent)

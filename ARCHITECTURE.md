@@ -78,17 +78,18 @@ Primary files:
 ### B) `tool.execute.before`
 
 1. Plugin detects bash tool command.
-2. Plugin requests daemon `optimize`.
-3. If optimization applies, command args are rewritten.
-4. Call context is saved for post-execution handling.
+2. Default mode is pass-through (no command rewrite).
+3. Optional rewrite mode (`RTK_ENABLE_PRE_EXECUTION_FLAGS=1`) requests daemon `optimize`.
+4. If optimization applies in rewrite mode, command args are rewritten.
+5. Call context is saved for post-execution handling.
 
 ### C) `tool.execute.after`
 
 1. Plugin retrieves pending context.
-2. Plugin enforces output guardrails.
+2. Plugin enforces output guardrails (skips template/markdown-sensitive output).
 3. `ensureDaemonRunning(...)` checks health with throttled caching and restart path.
-4. Plugin requests daemon `compress`.
-5. If `saved_tokens > 0`, output is replaced with compressed result.
+4. Plugin default mode is `metadata_only`: requests daemon `compress` but preserves visible output.
+5. Optional `replace_output` mode rewrites output only if `saved_tokens > 0`.
 6. On compression failure, plugin attempts `tee_save` while preserving original output.
 
 ### D) `session.idle`

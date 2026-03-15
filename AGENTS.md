@@ -13,8 +13,8 @@ Plugin:
 - `plugin/` (TypeScript OpenCode plugin)
 
 Primary runtime pipeline:
-- `tool.execute.before` -> daemon `optimize`
-- `tool.execute.after` -> daemon `compress`
+- `tool.execute.before` -> default pass-through (optional rewrite mode -> daemon `optimize`)
+- `tool.execute.after` -> default metadata-only compression via daemon `compress`
 - `session.idle` -> daemon `stats`
 
 ## Source of Truth Files
@@ -111,6 +111,9 @@ Plugin startup (`plugin/src/index.ts`):
   - faster re-probe window after failed checks
 - endpoint override via `RTK_DAEMON_ADDR`
 - binary resolution fallback chain via `RTK_DAEMON_PATH` -> local release binary -> PATH
+- plugin behavior toggles:
+  - `RTK_ENABLE_PRE_EXECUTION_FLAGS=1` enables pre-exec rewrite mode (default off)
+  - `RTK_POST_EXECUTION_MODE=off|metadata_only|replace_output` (default `metadata_only`)
 
 Spawn orchestration (`plugin/src/spawn.ts`):
 - validate binary path (absolute paths validated; relative paths PATH-resolved)
