@@ -8,6 +8,9 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub tee: TeeConfig,
+    #[cfg(feature = "llm")]
+    #[serde(default)]
+    pub llm: LlmConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +114,134 @@ impl Default for TeeConfig {
     }
 }
 
+/// LLM compression configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    /// Enable LLM compression for unknown commands
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Backend: "none" (disabled), "openrouter" (only option for now)
+    #[serde(default = "default_llm_backend")]
+    pub backend: String,
+
+    /// Strategy: "fallback-only" (only used when regex doesn't match)
+    #[serde(default = "default_llm_strategy")]
+    pub strategy: String,
+
+    /// Provider preference order (e.g., ["groq", "together"])
+    #[serde(default)]
+    pub provider_preference: Vec<String>,
+
+    /// Request timeout in milliseconds
+    #[serde(default = "default_llm_timeout_ms")]
+    pub timeout_ms: u64,
+
+    /// Temperature for generation
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+
+    /// OpenRouter specific settings
+    #[serde(default)]
+    pub openrouter: OpenRouterConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenRouterConfig {
+    /// Environment variable name for API key
+    #[serde(default = "default_api_key_env")]
+    pub api_key_env: String,
+
+    /// File path for API key (alternative to env var)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_file: Option<String>,
+
+    /// Model to use
+    #[serde(default = "default_model")]
+    pub model: String,
+
+    /// Base URL
+    #[serde(default = "default_openrouter_url")]
+    pub base_url: String,
+
+    /// Reasoning effort level
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
+
+    /// Maximum input tokens
+    #[serde(default = "default_max_input_tokens")]
+    pub max_input_tokens: usize,
+
+    /// Maximum output tokens
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: usize,
+}
+
+// Default functions
+fn default_llm_backend() -> String {
+    "openrouter".into()
+}
+
+fn default_llm_strategy() -> String {
+    "fallback-only".into()
+}
+fn default_llm_timeout_ms() -> u64 {
+    2000
+}
+fn default_temperature() -> f32 {
+    0.3
+}
+fn default_api_key_env() -> String {
+    "OPENROUTER_API_KEY".into()
+}
+fn default_model() -> String {
+    std::env::var("OPENROUTER_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "openai/gpt-oss-20b".into())
+}
+fn default_openrouter_url() -> String {
+    "https://openrouter.ai/api/v1".into()
+}
+fn default_reasoning_effort() -> String {
+    "low".into()
+}
+fn default_max_input_tokens() -> usize {
+    2000
+}
+fn default_max_output_tokens() -> usize {
+    100
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            backend: default_llm_backend(),
+            strategy: default_llm_strategy(),
+            provider_preference: vec!["groq".into(), "together".into()],
+            timeout_ms: default_llm_timeout_ms(),
+            temperature: default_temperature(),
+            openrouter: OpenRouterConfig::default(),
+        }
+    }
+}
+
+impl Default for OpenRouterConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: default_api_key_env(),
+            api_key_file: None,
+            model: default_model(),
+            base_url: default_openrouter_url(),
+            reasoning_effort: default_reasoning_effort(),
+            max_input_tokens: default_max_input_tokens(),
+            max_output_tokens: default_max_output_tokens(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -136,6 +267,8 @@ impl Default for Config {
                 tcp_address: None, // Will use default 127.0.0.1:9876 on Windows
             },
             tee: TeeConfig::default(),
+            #[cfg(feature = "llm")]
+            llm: LlmConfig::default(),
         }
     }
 }
@@ -168,6 +301,8 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("enable_pre_execution_flags"));
         assert!(json.contains("tee"));
+        #[cfg(feature = "llm")]
+        assert!(json.contains("llm"));
     }
 
     #[test]
@@ -207,5 +342,140 @@ mod tests {
         assert!(!tee.enabled);
         assert_eq!(tee.mode, "always");
         assert_eq!(tee.max_files, 50);
+    }
+
+    #[test]
+    fn test_llm_config_default() {
+        let llm = LlmConfig::default();
+        assert!(llm.enabled);
+        assert_eq!(llm.backend, "openrouter");
+        assert_eq!(llm.strategy, "fallback-only");
+        assert_eq!(llm.timeout_ms, 2000);
+        assert_eq!(llm.temperature, 0.3);
+        assert_eq!(llm.provider_preference, vec!["groq", "together"]);
+    }
+
+    #[test]
+    fn test_openrouter_config_default() {
+        let openrouter = OpenRouterConfig::default();
+        assert_eq!(openrouter.api_key_env, "OPENROUTER_API_KEY");
+        let expected_model = std::env::var("OPENROUTER_MODEL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "openai/gpt-oss-20b".into());
+        assert_eq!(openrouter.model, expected_model);
+        assert_eq!(openrouter.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(openrouter.reasoning_effort, "low");
+        assert_eq!(openrouter.max_input_tokens, 2000);
+        assert_eq!(openrouter.max_output_tokens, 100);
+        assert!(openrouter.api_key_file.is_none());
+    }
+
+    #[cfg(feature = "llm")]
+    #[test]
+    fn test_config_includes_llm() {
+        let config = Config::default();
+        assert!(config.llm.enabled);
+        assert_eq!(config.llm.backend, "openrouter");
+    }
+
+    #[cfg(feature = "llm")]
+    #[test]
+    fn test_config_serialization_includes_llm() {
+        let config = Config::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("llm"));
+        assert!(json.contains("openrouter"));
+    }
+
+    #[test]
+    fn test_llm_config_custom() {
+        let json = r#"{
+            "enabled": true,
+            "backend": "openrouter",
+            "strategy": "fallback-only",
+            "timeout_ms": 3000,
+            "temperature": 0.5,
+            "provider_preference": ["together", "groq"],
+            "openrouter": {
+                "api_key_env": "CUSTOM_API_KEY",
+                "model": "openai/gpt-4",
+                "reasoning_effort": "high"
+            }
+        }"#;
+
+        let llm: LlmConfig = serde_json::from_str(json).unwrap();
+        assert!(llm.enabled);
+        assert_eq!(llm.backend, "openrouter");
+        assert_eq!(llm.timeout_ms, 3000);
+        assert_eq!(llm.temperature, 0.5);
+        assert_eq!(llm.provider_preference, vec!["together", "groq"]);
+        assert_eq!(llm.openrouter.api_key_env, "CUSTOM_API_KEY");
+        assert_eq!(llm.openrouter.model, "openai/gpt-4");
+        assert_eq!(llm.openrouter.reasoning_effort, "high");
+    }
+
+    #[cfg(feature = "llm")]
+    #[test]
+    fn test_config_deserialization_with_llm() {
+        let json = r#"{
+            "general": {
+                "enable_tracking": true,
+                "database_path": "/tmp/test.db",
+                "retention_days": 30,
+                "default_filter_level": "minimal",
+                "verbosity": 0
+            },
+            "daemon": {
+                "socket_path": "/tmp/test.sock",
+                "max_connections": 50,
+                "timeout_seconds": 10,
+                "auto_restart": false
+            },
+            "llm": {
+                "enabled": true,
+                "backend": "openrouter",
+                "openrouter": {
+                    "model": "openai/gpt-4"
+                }
+            }
+        }"#;
+
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.llm.enabled);
+        assert_eq!(config.llm.backend, "openrouter");
+        assert_eq!(config.llm.openrouter.model, "openai/gpt-4");
+    }
+
+    #[test]
+    fn test_default_model_with_env_var() {
+        std::env::set_var("OPENROUTER_MODEL", "meta-llama/llama-3-70b");
+        let model = default_model();
+        assert_eq!(model, "meta-llama/llama-3-70b");
+        std::env::remove_var("OPENROUTER_MODEL");
+    }
+
+    #[test]
+    fn test_default_model_with_empty_env_var() {
+        std::env::set_var("OPENROUTER_MODEL", "");
+        let model = default_model();
+        assert_eq!(model, "openai/gpt-oss-20b");
+        std::env::remove_var("OPENROUTER_MODEL");
+    }
+
+    #[test]
+    fn test_default_model_with_whitespace() {
+        std::env::set_var("OPENROUTER_MODEL", "  meta-llama/llama-3-70b  ");
+        let model = default_model();
+        assert_eq!(model, "meta-llama/llama-3-70b");
+        std::env::remove_var("OPENROUTER_MODEL");
+    }
+
+    #[test]
+    fn test_default_model_without_env_var() {
+        std::env::remove_var("OPENROUTER_MODEL");
+        let model = default_model();
+        assert_eq!(model, "openai/gpt-oss-20b");
     }
 }

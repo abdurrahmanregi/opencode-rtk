@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn test_detect_command_with_leading_path() {
         // Test commands with leading paths don't cause false matches
-        let module = detect_command("/opt/tools/npm install");
+        let _module = detect_command("/opt/tools/npm install");
         // Current behavior: path-prefixed commands may not be detected
         // This test documents the current behavior
         let module2 = detect_command("npm install");

@@ -1,14 +1,87 @@
 use anyhow::{Context as AnyhowContext, Result};
 use clap::{Parser, Subcommand};
 use rtk_core::{compress, Context};
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::process::ExitCode;
+use std::time::Duration;
+
+use serde_json::Value;
 
 /// Maximum input size (10 MB)
 const MAX_INPUT_SIZE: usize = 10 * 1024 * 1024;
 
 /// Exit code for unimplemented commands
 const EXIT_NOT_IMPLEMENTED: u8 = 2;
+/// Default daemon address (Windows uses TCP)
+const DAEMON_ADDR: &str = "127.0.0.1:9876";
+/// Connection timeout in milliseconds
+const CONNECT_TIMEOUT_MS: u64 = 2000;
+/// Check if the daemon is healthy by connecting and sending a health check request
+fn check_daemon_health() -> Result<bool> {
+    use std::net::SocketAddr;
+    
+    let addr: SocketAddr = DAEMON_ADDR.parse()
+        .context("Invalid daemon address")?;
+    let stream = TcpStream::connect_timeout(
+        &addr,
+        Duration::from_millis(CONNECT_TIMEOUT_MS),
+    ).context("Failed to connect to daemon. Is it running?")?;
+    
+    let mut reader = BufReader::new(stream.try_clone().context("Failed to clone stream")?);
+    let mut writer = stream;
+    
+    // Send health check request (JSON-RPC 2.0 format)
+    // Note: params should be null or omitted for health check (no params needed)
+    let request = r#"{"jsonrpc":"2.0","method":"health","id":1,"params":null}"#;
+    writer.write_all(format!("{}\n", request).as_bytes())
+        .context("Failed to send health request")?;
+    writer.flush().context("Failed to flush request")?;
+    
+    // Read response
+    let mut response = String::new();
+    let bytes_read = reader.read_line(&mut response)
+        .context("Failed to read response from daemon")?;
+    
+    if bytes_read == 0 {
+        return Err(anyhow::anyhow!("Daemon closed connection without sending response"));
+    }
+    
+    // Parse response
+    let parsed: Value = serde_json::from_str(&response.trim())
+        .context("Failed to parse daemon response")?;
+    
+    // Check if response indicates healthy
+    if let Some(result) = parsed.get("result") {
+        // Check for status field (could be "ok" or an object)
+        if let Some(status) = result.get("status") {
+            let status_str = status.as_str().unwrap_or("unknown");
+            if status_str == "ok" {
+                let version = result.get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                println!("Daemon is healthy (version: {})", version);
+                return Ok(true);
+            }
+        }
+        
+        // Status present but not "ok"
+        eprintln!("Daemon returned unhealthy status: {}", result);
+        return Ok(false);
+    }
+    
+    // Check for error in response
+    if let Some(error) = parsed.get("error") {
+        let msg = error.get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        eprintln!("Daemon returned error: {}", msg);
+        return Ok(false);
+    }
+    
+    eprintln!("Unexpected response from daemon: {}", response);
+    Ok(false)
+}
 
 #[derive(Parser)]
 #[command(name = "rtk-cli")]
@@ -17,7 +90,6 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
-
 #[derive(Subcommand)]
 enum Commands {
     /// Compress output via stdin
@@ -25,15 +97,12 @@ enum Commands {
         /// Original command
         #[arg(short, long)]
         command: String,
-
         /// Working directory
         #[arg(short = 'd', long, default_value = ".")]
         cwd: String,
     },
-
     /// Check daemon health
     Health,
-
     /// Show session statistics
     Stats {
         /// Session ID
@@ -41,29 +110,24 @@ enum Commands {
         session: Option<String>,
     },
 }
-
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {}", e);
-            
             // Print error chain for debugging
             let mut source = e.source();
             while let Some(cause) = source {
                 eprintln!("Caused by: {}", cause);
                 source = cause.source();
             }
-            
             ExitCode::FAILURE
         }
     }
 }
-
 async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
-
     match cli.command {
         Commands::Compress { command, cwd } => {
             // Read stdin with validation
@@ -71,14 +135,12 @@ async fn run() -> Result<ExitCode> {
             io::stdin()
                 .read_to_string(&mut input)
                 .context("Failed to read from stdin. Make sure to pipe input.")?;
-
             // Validate input
             if input.is_empty() {
                 return Err(anyhow::anyhow!(
                     "No input provided on stdin. Usage: some-command | rtk-cli compress -c 'some-command'"
                 ));
             }
-
             if input.len() > MAX_INPUT_SIZE {
                 return Err(anyhow::anyhow!(
                     "Input too large ({} bytes). Maximum allowed: {} bytes ({} MB)",
@@ -87,7 +149,6 @@ async fn run() -> Result<ExitCode> {
                     MAX_INPUT_SIZE / (1024 * 1024)
                 ));
             }
-
             let context = Context {
                 cwd,
                 exit_code: 0,
@@ -95,25 +156,30 @@ async fn run() -> Result<ExitCode> {
                 session_id: None,
                 command: Some(command.clone()),
             };
-
             let result = compress(&command, &input, context)
                 .with_context(|| format!("Failed to compress output for command: {}", command))?;
-
             println!("{}", result.compressed);
             eprintln!(
                 "Saved {} tokens ({:.1}%)",
                 result.saved_tokens, result.savings_pct
             );
-
             Ok(ExitCode::SUCCESS)
         }
-
         Commands::Health => {
-            eprintln!("Error: Health check not implemented in CLI mode.");
-            eprintln!("Hint: Use the daemon mode (rtk-daemon) for health checks.");
-            Ok(ExitCode::from(EXIT_NOT_IMPLEMENTED))
+            match check_daemon_health() {
+                Ok(healthy) => {
+                    if healthy {
+                        Ok(ExitCode::SUCCESS)
+                    } else {
+                        Ok(ExitCode::FAILURE)
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    Ok(ExitCode::FAILURE)
+                }
+            }
         }
-
         Commands::Stats { session } => {
             eprintln!("Error: Stats not implemented in CLI mode.");
             eprintln!("Hint: Use the daemon mode (rtk-daemon) for statistics.");

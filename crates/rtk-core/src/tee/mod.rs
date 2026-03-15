@@ -155,10 +155,8 @@ impl TeeManager {
 
         for (i, entry) in entries.iter().enumerate() {
             let should_delete = i >= self.max_files || entry.timestamp < cutoff;
-            if should_delete {
-                if self.delete(&entry.path).is_ok() {
-                    removed += 1;
-                }
+            if should_delete && self.delete(&entry.path).is_ok() {
+                removed += 1;
             }
         }
 

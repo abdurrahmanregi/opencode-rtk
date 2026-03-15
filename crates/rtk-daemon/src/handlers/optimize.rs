@@ -42,8 +42,8 @@ pub struct OptimizeResult {
 /// JSON result with optimization details
 pub async fn handle(params: Value, config: &Config) -> Result<Value> {
     // Parse parameters
-    let params: OptimizeParams = serde_json::from_value(params)
-        .map_err(|e| anyhow::anyhow!("Invalid parameters: {}", e))?;
+    let params: OptimizeParams =
+        serde_json::from_value(params).map_err(|e| anyhow::anyhow!("Invalid parameters: {}", e))?;
 
     // Check if pre-execution is enabled
     if !config.general.enable_pre_execution_flags {
@@ -75,18 +75,38 @@ mod tests {
     use rtk_core::config::{DaemonConfig, GeneralConfig, TeeConfig};
 
     fn test_config() -> Config {
-        Config {
-            general: GeneralConfig {
-                enable_tracking: true,
-                database_path: ":memory:".to_string(),
-                retention_days: 90,
-                default_filter_level: "minimal".to_string(),
-                verbosity: 0,
-                enable_pre_execution_flags: true,
-                flag_mappings_path: None,
-            },
-            daemon: DaemonConfig::default(),
-            tee: TeeConfig::default(),
+        #[cfg(feature = "llm")]
+        {
+            Config {
+                general: GeneralConfig {
+                    enable_tracking: true,
+                    database_path: ":memory:".to_string(),
+                    retention_days: 90,
+                    default_filter_level: "minimal".to_string(),
+                    verbosity: 0,
+                    enable_pre_execution_flags: true,
+                    flag_mappings_path: None,
+                },
+                daemon: DaemonConfig::default(),
+                tee: TeeConfig::default(),
+                llm: rtk_core::config::LlmConfig::default(),
+            }
+        }
+        #[cfg(not(feature = "llm"))]
+        {
+            Config {
+                general: GeneralConfig {
+                    enable_tracking: true,
+                    database_path: ":memory:".to_string(),
+                    retention_days: 90,
+                    default_filter_level: "minimal".to_string(),
+                    verbosity: 0,
+                    enable_pre_execution_flags: true,
+                    flag_mappings_path: None,
+                },
+                daemon: DaemonConfig::default(),
+                tee: TeeConfig::default(),
+            }
         }
     }
 

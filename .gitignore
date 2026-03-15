@@ -24,6 +24,14 @@ node_modules/
 dist/
 *.log
 
+# API Keys (NEW)
+.env
+.env.local
+*.env.local
+
+# OpenRouter key file
+.openrouter_key
+
 # Test
 test-results/
 coverage/

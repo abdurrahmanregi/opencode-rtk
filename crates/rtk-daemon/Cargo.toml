@@ -21,8 +21,17 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
+# LLM support dependencies (optional)
+reqwest = { version = "0.12", features = ["json"], optional = true }
+shellexpand = { version = "3.1", optional = true }
+dotenvy = { version = "0.15", optional = true }
+
 [target.'cfg(unix)'.dependencies]
 tokio-stream = "0.1"
+
+[features]
+default = ["llm"]
+llm = ["rtk-core/llm", "reqwest", "shellexpand", "dotenvy"]
 
 [dev-dependencies]
 tempfile = "3"

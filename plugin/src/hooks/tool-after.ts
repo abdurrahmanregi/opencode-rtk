@@ -5,6 +5,7 @@ import type {
 import { RTKDaemonClient } from "../client";
 import type { CompressRequest } from "../types";
 import { pendingCommands } from "../state";
+import { ensureDaemonRunning } from "../index";
 
 /**
  * Post-execution hook for tool.execute
@@ -25,16 +26,15 @@ export async function onToolExecuteAfter(
     return;
   }
 
-  // Retrieve context stored by tool-before hook
+  // Retrieve context stored by tool-before hook and delete atomically
   // This uses the SAME Map instance as tool-before via shared state module
+  // Atomic get-and-delete to prevent race conditions with concurrent executions
   const context = pendingCommands.get(input.callID);
+  pendingCommands.delete(input.callID);
 
   if (!context) {
     return;
   }
-
-  // Clean up after retrieving (one-shot use)
-  pendingCommands.delete(input.callID);
 
   const command = context.optimizedCommand;
   const rawOutput = output.output || "";
@@ -47,8 +47,8 @@ export async function onToolExecuteAfter(
     return;
   }
 
-  // Check if daemon is healthy
-  const isHealthy = await client.health();
+  // Ensure daemon is running with auto-restart capability
+  const isHealthy = await ensureDaemonRunning(client);
 
   if (!isHealthy) {
     console.warn("RTK: Daemon not available, skipping compression");

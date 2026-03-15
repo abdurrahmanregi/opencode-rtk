@@ -20,6 +20,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 dirs = "5"
+rtk-core = { path = "crates/rtk-core" }
 
 [profile.release]
 opt-level = 3

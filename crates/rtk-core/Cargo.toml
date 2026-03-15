@@ -17,6 +17,10 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
 toml = { workspace = true }
+shellexpand = "3.1"
+
+[features]
+llm = []
 
 [dev-dependencies]
 tokio-test = "0.4"

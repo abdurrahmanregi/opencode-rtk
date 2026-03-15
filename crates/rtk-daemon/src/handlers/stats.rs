@@ -1,5 +1,5 @@
 use super::HandlerResult;
-use crate::protocol::{INVALID_PARAMS, INTERNAL_ERROR};
+use crate::protocol::{INTERNAL_ERROR, INVALID_PARAMS};
 use rtk_core::tracking::db::get_session_stats;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,7 +22,7 @@ struct StatsResult {
 pub async fn handle(params: Value) -> HandlerResult {
     let params: StatsParams = serde_json::from_value(params)
         .map_err(|e| (INVALID_PARAMS, format!("Invalid parameters: {}", e)))?;
-    
+
     // For now, return empty stats if no session_id
     // In a real implementation, we'd aggregate across all sessions
     let stats = if let Some(session_id) = params.session_id {
@@ -33,7 +33,7 @@ pub async fn handle(params: Value) -> HandlerResult {
             "message": "Session ID required for stats"
         }));
     };
-    
+
     let result = StatsResult {
         command_count: stats.command_count,
         total_original_tokens: stats.total_original_tokens,
@@ -41,7 +41,7 @@ pub async fn handle(params: Value) -> HandlerResult {
         total_saved_tokens: stats.total_saved_tokens,
         savings_pct: stats.savings_pct(),
     };
-    
+
     serde_json::to_value(result)
         .map_err(|e| (INTERNAL_ERROR, format!("Serialization failed: {}", e)))
 }

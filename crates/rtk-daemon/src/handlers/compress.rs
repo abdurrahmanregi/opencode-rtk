@@ -1,9 +1,14 @@
+#[cfg(feature = "llm")]
+use super::llm::LlmCompressor;
 use super::HandlerResult;
-use crate::protocol::{INVALID_PARAMS, INTERNAL_ERROR};
+use crate::protocol::{INTERNAL_ERROR, INVALID_PARAMS};
 use rtk_core::{compress, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, warn};
+
+/// Maximum characters to keep in fallback compression
+const FALLBACK_MAX_CHARS: usize = 1000;
 
 #[derive(Debug, Deserialize)]
 struct CompressParams {
@@ -43,7 +48,7 @@ struct CompressResult {
 pub async fn handle(params: Value, _config: &rtk_core::config::Config) -> HandlerResult {
     let params: CompressParams = serde_json::from_value(params)
         .map_err(|e| (INVALID_PARAMS, format!("Invalid parameters: {}", e)))?;
-    
+
     let context = Context {
         cwd: params.context.cwd,
         exit_code: params.context.exit_code,
@@ -51,10 +56,77 @@ pub async fn handle(params: Value, _config: &rtk_core::config::Config) -> Handle
         session_id: params.context.session_id,
         command: Some(params.command.clone()),
     };
-    
-    let result = compress(&params.command, &params.output, context.clone())
+
+    // Try standard compression first
+    let mut result = compress(&params.command, &params.output, context.clone())
         .map_err(|e| (INTERNAL_ERROR, format!("Compression failed: {}", e)))?;
-    
+
+    // If no module matched and LLM is available, try LLM compression
+    if result.module == "unknown" {
+        debug!("No module matched, checking LLM fallback");
+
+        #[cfg(feature = "llm")]
+        {
+            debug!("LLM config: enabled={}, backend={}", _config.llm.enabled, _config.llm.backend);
+            let llm_compressor = LlmCompressor::new(_config.llm.clone());
+
+            match llm_compressor {
+                Ok(compressor) => {
+                    debug!("LLM compressor initialized, available={}", compressor.is_available());
+                    if compressor.is_available() {
+                        debug!("LLM compression available, attempting compression");
+                        match compressor
+                            .compress(&params.command, &params.output, context.exit_code)
+                            .await
+                        {
+                            Ok(llm_compressed) => {
+                                debug!("LLM returned {} chars", llm_compressed.len());
+                                let llm_tokens = rtk_core::estimate_tokens(&llm_compressed);
+                                let llm_saved = result.original_tokens.saturating_sub(llm_tokens);
+                                let llm_savings = if result.original_tokens > 0 {
+                                    (llm_saved as f64 / result.original_tokens as f64) * 100.0
+                                } else {
+                                    0.0
+                                };
+
+                                if llm_saved > 0 {
+                                    debug!("LLM compression succeeded: saved {} tokens", llm_saved);
+                                    result.compressed = llm_compressed;
+                                    result.compressed_tokens = llm_tokens;
+                                    result.saved_tokens = llm_saved;
+                                    result.savings_pct = llm_savings;
+                                    result.strategy = "llm".to_string();
+                                    result.module = "llm".to_string();
+                                } else {
+                                    debug!("LLM compression provided no savings ({} orig, {} compressed), using fallback", result.original_tokens, llm_tokens);
+                                    result = apply_fallback(&params.output, result.original_tokens);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("LLM compression failed: {}, using fallback", e);
+                                result = apply_fallback(&params.output, result.original_tokens);
+                            }
+                        }
+                    } else {
+                        warn!("LLM compression not available (enabled={}, has_api_key={}), using fallback", 
+                              _config.llm.enabled, compressor.has_api_key());
+                        result = apply_fallback(&params.output, result.original_tokens);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to initialize LLM compressor: {}, using fallback", e);
+                    result = apply_fallback(&params.output, result.original_tokens);
+                }
+            }
+        }
+
+        #[cfg(not(feature = "llm"))]
+        {
+            debug!("LLM feature not enabled, using fallback");
+            result = apply_fallback(&params.output, result.original_tokens);
+        }
+    }
+
     // Track if enabled
     if let Some(session_id) = &context.session_id {
         if _config.general.enable_tracking {
@@ -74,7 +146,7 @@ pub async fn handle(params: Value, _config: &rtk_core::config::Config) -> Handle
             }
         }
     }
-    
+
     let response = CompressResult {
         compressed: result.compressed,
         original_tokens: result.original_tokens,
@@ -84,36 +156,91 @@ pub async fn handle(params: Value, _config: &rtk_core::config::Config) -> Handle
         strategy: result.strategy,
         module: result.module,
     };
-    
+
     serde_json::to_value(response)
         .map_err(|e| (INTERNAL_ERROR, format!("Serialization failed: {}", e)))
+}
+
+/// Apply fallback compression for unknown commands
+fn apply_fallback(output: &str, original_tokens: usize) -> rtk_core::CompressedOutput {
+    // Truncate to FALLBACK_MAX_CHARS characters if longer
+    let truncated = if output.len() > FALLBACK_MAX_CHARS {
+        // Find safe UTF-8 boundary
+        let safe_end = output.char_indices()
+            .take_while(|(idx, _)| *idx < FALLBACK_MAX_CHARS)
+            .last()
+            .map(|(idx, c)| idx + c.len_utf8())
+            .unwrap_or(0);
+
+        // Reserve space for suffix
+        let suffix = "...\n[TRUNCATED]";
+        let truncate_to = safe_end.saturating_sub(suffix.len()).min(safe_end);
+
+        format!("{}{}", &output[..truncate_to], suffix)
+    } else {
+        output.to_string()
+    };
+
+    // Try to extract errors
+    let compressed = if let Some(errors) = extract_errors(&truncated) {
+        errors
+    } else {
+        truncated
+    };
+
+    let compressed_tokens = rtk_core::estimate_tokens(&compressed);
+    let saved_tokens = original_tokens.saturating_sub(compressed_tokens);
+    let savings_pct = if original_tokens > 0 {
+        (saved_tokens as f64 / original_tokens as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    rtk_core::CompressedOutput {
+        compressed,
+        original_tokens,
+        compressed_tokens,
+        saved_tokens,
+        savings_pct,
+        strategy: "fallback".to_string(),
+        module: "fallback".to_string(),
+    }
+}
+
+/// Extract errors from output
+fn extract_errors(output: &str) -> Option<String> {
+    let lines: Vec<&str> = output.lines().collect();
+    let errors: Vec<String> = lines
+        .into_iter()
+        .filter(|line| {
+            line.to_lowercase().contains("error")
+                || line.to_lowercase().contains("failed")
+                || line.to_lowercase().contains("warning")
+                || line.to_lowercase().contains("exception")
+        })
+        .map(|s| s.to_string())
+        .collect();
+
+    if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("\n"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rtk_core::config::{Config, DaemonConfig, GeneralConfig, TeeConfig};
+    use rtk_core::config::Config;
 
     fn make_config(enable_tracking: bool) -> Config {
-        Config {
-            general: GeneralConfig {
-                enable_tracking,
-                database_path: ":memory:".to_string(),
-                retention_days: 90,
-                default_filter_level: "minimal".to_string(),
-                verbosity: 0,
-                enable_pre_execution_flags: true,
-                flag_mappings_path: None,
-            },
-            daemon: DaemonConfig {
-                socket_path: "/tmp/test.sock".to_string(),
-                max_connections: 10,
-                timeout_seconds: 5,
-                auto_restart: false,
-                tcp_address: None,
-            },
-            tee: TeeConfig::default(),
-        }
+        let mut config = Config::default();
+        config.general.enable_tracking = enable_tracking;
+        config.general.database_path = ":memory:".to_string();
+        config.daemon.socket_path = "/tmp/test.sock".to_string();
+        config.daemon.max_connections = 10;
+        config.daemon.auto_restart = false;
+        config
     }
 
     fn make_params(command: &str, output: &str, session_id: Option<&str>) -> Value {
@@ -215,5 +342,37 @@ mod tests {
 
         let result = handle(params, &config).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_compress_unknown_command_with_fallback() {
+        let config = make_config(false);
+        let params = make_params(
+            "unknown_cmd test",
+            "output line 1\noutput line 2\nError: something failed\n",
+            None,
+        );
+
+        let result = handle(params, &config).await;
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        // Should use fallback for unknown commands
+        assert!(value.get("compressed").is_some());
+    }
+
+    #[test]
+    fn test_extract_errors() {
+        let output = "Starting build...\nError: compilation failed\nWarning: unused variable\nBuild complete";
+        let errors = extract_errors(output);
+        assert!(errors.is_some());
+        assert!(errors.unwrap().contains("Error: compilation failed"));
+    }
+
+    #[test]
+    fn test_extract_errors_none() {
+        let output = "Starting build...\nBuild complete";
+        let errors = extract_errors(output);
+        assert!(errors.is_none());
     }
 }

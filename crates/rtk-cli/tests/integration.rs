@@ -45,13 +45,14 @@ fn test_compress_missing_command() {
 }
 
 #[test]
-fn test_health_not_implemented() {
+fn test_health_daemon_not_running() {
     let mut cmd = Command::cargo_bin("rtk-cli").unwrap();
 
+    // When daemon is not running, health check should fail with exit code 1
     cmd.arg("health")
         .assert()
-        .code(2)
-        .stderr(predicate::str::contains("not implemented"));
+        .code(1)
+        .stderr(predicate::str::contains("Failed to connect to daemon"));
 }
 
 #[test]

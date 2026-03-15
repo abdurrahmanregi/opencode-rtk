@@ -103,28 +103,31 @@ pub async fn handle_read(params: Value, config: &Config) -> Result<Value> {
     let params: TeeReadParams = serde_json::from_value(params)?;
 
     let tee_dir = PathBuf::from(&config.tee.directory);
-    
+
     // Create tee directory if it doesn't exist for canonicalization
     if !tee_dir.exists() {
         std::fs::create_dir_all(&tee_dir)
             .with_context(|| format!("Failed to create tee directory: {:?}", tee_dir))?;
     }
-    
+
     let tee_dir_canonical = tee_dir
         .canonicalize()
         .with_context(|| format!("Failed to canonicalize tee directory: {:?}", tee_dir))?;
-    
+
     let requested_path = PathBuf::from(&params.path);
-    
+
     // Only canonicalize if the path exists
     let requested_canonical = if requested_path.exists() {
-        requested_path
-            .canonicalize()
-            .with_context(|| format!("Failed to canonicalize requested path: {:?}", requested_path))?
+        requested_path.canonicalize().with_context(|| {
+            format!(
+                "Failed to canonicalize requested path: {:?}",
+                requested_path
+            )
+        })?
     } else {
         requested_path
     };
-    
+
     // Security check: ensure path is within tee directory
     if !requested_canonical.starts_with(&tee_dir_canonical) {
         return Err(anyhow::anyhow!(
@@ -164,24 +167,50 @@ mod tests {
     use tempfile::tempdir;
 
     fn test_config_with_dir(dir: &std::path::Path) -> Config {
-        Config {
-            general: GeneralConfig {
-                enable_tracking: true,
-                database_path: ":memory:".to_string(),
-                retention_days: 90,
-                default_filter_level: "minimal".to_string(),
-                verbosity: 0,
-                enable_pre_execution_flags: true,
-                flag_mappings_path: None,
-            },
-            daemon: DaemonConfig::default(),
-            tee: TeeConfig {
-                enabled: true,
-                mode: "failures".to_string(),
-                max_files: 10,
-                retention_days: 90,
-                directory: dir.to_string_lossy().to_string(),
-            },
+        #[cfg(feature = "llm")]
+        {
+            Config {
+                general: GeneralConfig {
+                    enable_tracking: true,
+                    database_path: ":memory:".to_string(),
+                    retention_days: 90,
+                    default_filter_level: "minimal".to_string(),
+                    verbosity: 0,
+                    enable_pre_execution_flags: true,
+                    flag_mappings_path: None,
+                },
+                daemon: DaemonConfig::default(),
+                tee: TeeConfig {
+                    enabled: true,
+                    mode: "failures".to_string(),
+                    max_files: 10,
+                    retention_days: 90,
+                    directory: dir.to_string_lossy().to_string(),
+                },
+                llm: rtk_core::config::LlmConfig::default(),
+            }
+        }
+        #[cfg(not(feature = "llm"))]
+        {
+            Config {
+                general: GeneralConfig {
+                    enable_tracking: true,
+                    database_path: ":memory:".to_string(),
+                    retention_days: 90,
+                    default_filter_level: "minimal".to_string(),
+                    verbosity: 0,
+                    enable_pre_execution_flags: true,
+                    flag_mappings_path: None,
+                },
+                daemon: DaemonConfig::default(),
+                tee: TeeConfig {
+                    enabled: true,
+                    mode: "failures".to_string(),
+                    max_files: 10,
+                    retention_days: 90,
+                    directory: dir.to_string_lossy().to_string(),
+                },
+            }
         }
     }
 

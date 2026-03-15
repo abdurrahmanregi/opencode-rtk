@@ -7,15 +7,124 @@ import { startCleanupTimer } from "./state";
 import { isDaemonRunning, autoStartDaemon } from "./spawn";
 
 import * as os from "os";
+import * as path from "path";
+import * as fs from "fs";
 
 let startPromise: Promise<boolean> | null = null;
-let isStarting = false;
 
 const isWindows = os.platform() === "win32";
-const RTK_SOCKET_PATH = isWindows ? "127.0.0.1:9876" : "/tmp/opencode-rtk.sock";
-const RTK_BINARY = isWindows ? "opencode-rtk.exe" : "opencode-rtk";
+const RTK_SOCKET_PATH =
+  process.env.RTK_DAEMON_ADDR ||
+  (isWindows ? "127.0.0.1:9876" : "/tmp/opencode-rtk.sock");
 
-export const RTKPlugin: Plugin = async ({ directory, worktree }) => {
+// Resolve binary path:
+// 1. Check RTK_DAEMON_PATH environment variable (for production)
+// 2. Fall back to relative path from plugin to target/release (for development)
+// 3. Fall back to binary name (relies on PATH)
+const DEV_BINARY = path.join(
+  __dirname,
+  "..",
+  "..",
+  "target",
+  "release",
+  isWindows ? "opencode-rtk.exe" : "opencode-rtk",
+);
+
+const RTK_BINARY = process.env.RTK_DAEMON_PATH ||
+  (fs.existsSync(DEV_BINARY)
+    ? DEV_BINARY
+    : (isWindows ? "opencode-rtk.exe" : "opencode-rtk"));
+
+const MAX_RESTARTS_PER_SESSION = 3;
+const FAILED_HEALTH_RECHECK_MS = 1000;
+const HEALTHY_HEALTH_RECHECK_MS = 1500;
+
+let lastHealthCheckTime = 0;
+let lastHealthCheckResult = false;
+let daemonRestartCount = 0;
+
+export function shouldUseCachedHealth(
+  elapsedMs: number,
+  lastResult: boolean,
+  forceCheck: boolean = false,
+): boolean {
+  if (forceCheck) {
+    return false;
+  }
+
+  if (lastResult) {
+    return elapsedMs < HEALTHY_HEALTH_RECHECK_MS;
+  }
+
+  return elapsedMs < FAILED_HEALTH_RECHECK_MS;
+}
+
+// Mutex-like pattern to prevent concurrent restart attempts
+let restartPromise: Promise<boolean> | null = null;
+
+async function ensureDaemonRunning(
+  client: RTKDaemonClient,
+  forceCheck: boolean = false
+): Promise<boolean> {
+  const now = Date.now();
+  const elapsed = now - lastHealthCheckTime;
+
+  // Throttle health checks; recheck sooner after recent failures.
+  if (shouldUseCachedHealth(elapsed, lastHealthCheckResult, forceCheck)) {
+    return lastHealthCheckResult;
+  }
+
+  const isHealthy = await client.health();
+  lastHealthCheckTime = Date.now();
+  lastHealthCheckResult = isHealthy;
+
+  if (isHealthy) {
+    return true;
+  }
+
+  // Daemon appears down, attempt restart with mutex-like protection
+  if (daemonRestartCount < MAX_RESTARTS_PER_SESSION) {
+    if (!restartPromise) {
+      console.warn("[RTK] Daemon appears down, attempting restart...");
+      daemonRestartCount++;
+
+      restartPromise = (async () => {
+        try {
+          const restarted = await autoStartDaemon(RTK_BINARY, client);
+          if (restarted) {
+            console.log("[RTK] Daemon restarted successfully");
+            lastHealthCheckTime = Date.now();
+            lastHealthCheckResult = true;
+            daemonRestartCount = 0;
+            return true;
+          }
+
+          console.error("[RTK] Failed to restart daemon");
+          lastHealthCheckTime = Date.now();
+          lastHealthCheckResult = false;
+          return false;
+        } finally {
+          restartPromise = null;
+        }
+      })();
+    } else {
+      console.log("[RTK] Daemon restart already in progress, waiting...");
+    }
+
+    return await restartPromise;
+  }
+
+  console.error(
+    `[RTK] Max restart attempts (${MAX_RESTARTS_PER_SESSION}) reached`
+  );
+  lastHealthCheckTime = Date.now();
+  lastHealthCheckResult = false;
+  return false;
+}
+
+export { ensureDaemonRunning };
+
+export const RTKPlugin: Plugin = async ({ directory, worktree: _worktree }) => {
   const client = new RTKDaemonClient(RTK_SOCKET_PATH);
   
   // Start periodic cleanup of expired pending commands
@@ -25,25 +134,19 @@ export const RTKPlugin: Plugin = async ({ directory, worktree }) => {
   let isHealthy = await isDaemonRunning(client);
   
   if (!isHealthy) {
-    if (startPromise || isStarting) {
+    if (startPromise) {
       console.log("[RTK] Waiting for existing daemon startup...");
-      if (startPromise) {
-        isHealthy = await startPromise;
-      }
+      isHealthy = await startPromise;
     } else {
-      isStarting = true;
       startPromise = (async () => {
-        console.log(`[RTK] Daemon not running, starting '${RTK_BINARY}'...`);
-        return await autoStartDaemon(RTK_BINARY, client);
+        try {
+          return await autoStartDaemon(RTK_BINARY, client);
+        } finally {
+          startPromise = null;
+        }
       })();
       
       isHealthy = await startPromise;
-      
-      // Only reset flags after successful startup
-      if (isHealthy) {
-        startPromise = null;
-        isStarting = false;
-      }
     }
   } else {
     console.log("[RTK] Daemon already running");

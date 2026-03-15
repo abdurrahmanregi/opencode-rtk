@@ -1,366 +1,147 @@
 # OpenCode-RTK
 
-> High-performance token optimization proxy for OpenCode CLI
+OpenCode-RTK is a token-optimization sidecar for OpenCode CLI.
 
-**60-90% token savings** on common development commands through intelligent output filtering and compression.
+It combines:
+- pre-execution command optimization (`optimize`), and
+- post-execution output compression (`compress`),
 
-## What Does This Do?
+while preserving fail-open behavior (original output remains usable if RTK is down).
 
-When you run commands in OpenCode CLI (like `git status`, `npm test`, `cargo build`), the output can be very long and consume lots of tokens. This tool:
+## Repository Contents
 
-1. **Intercepts** command output before it reaches the LLM
-2. **Compresses** the output intelligently (keeps errors, removes noise)
-3. **Saves** 60-90% of tokens on most commands
+- `crates/rtk-core`: command detection, optimization/compression strategies, config, tracking, tee
+- `crates/rtk-daemon`: JSON-RPC daemon transport and handlers
+- `crates/rtk-cli`: direct CLI entrypoint for daemon functionality
+- `plugin`: TypeScript OpenCode plugin (`tool.execute.before`, `tool.execute.after`, `session.idle`)
 
-**Hybrid Optimization Approach:**
+## Runtime Flow
 
-OpenCode-RTK uses a **two-stage optimization** for maximum token savings:
+1. `tool.execute.before`
+   - plugin calls daemon `optimize`
+   - plugin rewrites command if flags are added
+2. command executes
+3. `tool.execute.after`
+   - plugin ensures daemon health (with startup/restart path)
+   - plugin calls daemon `compress`
+   - plugin replaces output only when savings are positive
+   - on compression failure, plugin can `tee_save` raw output
+4. `session.idle`
+   - plugin calls `stats` and prints session-level savings
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    HYBRID OPTIMIZATION FLOW                              │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  1. BEFORE EXECUTION:                                                       │
-│     • Detect command type (git, npm, cargo, etc.)                          │
-│     • Add optimization flags (--json, --quiet, --porcelain)                  │
-│     • Store original command in context                                          │
-│                                                                             │
-│  2. EXECUTION:                                                                │
-│     • Command runs with optimized flags → smaller output                       │
-│                                                                             │
-│  3. AFTER EXECUTION:                                                         │
-│     • Send output to RTK daemon for compression                      │
-│     • Replace with compressed version (additional 80% reduction)       │
-│     • Track token savings in SQLite                                         │
-│                                                                             │
-│  SAVINGS: Pre-execution flags (50%) + Post-execution filter (80%) = 90% total │
-│                                                                             │
-│  DCP SYNERGY: Smaller compressed messages = DCP can keep more context    │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────┘
-```
+## Startup and Reliability
 
-**Example:**
-```
-# Without RTK (2000 tokens):
-$ git status
-M src/auth.rs
-M src/user.rs
-... (50 more lines, ~2000 tokens)
+Current plugin startup behavior (`plugin/src/index.ts`, `plugin/src/spawn.ts`, `plugin/src/client.ts`):
 
-# With RTK Pre-execution only (500 tokens, 75% savings):
-$ git status --porcelain -b
-M src/auth.rs
-... (50 more lines, still ~500 tokens)
+- lock-based startup/restart coordination via `startPromise` and `restartPromise`
+- throttled health cache with faster recheck after recent failures
+- robust daemon binary resolution:
+  - `RTK_DAEMON_PATH` override
+  - local `target/release` binary if present
+  - fallback to PATH (`opencode-rtk` / `opencode-rtk.exe`)
+- strict TCP address parsing (IPv4, hostname, bracketed IPv6) via `plugin/src/address.ts`
+- TCP/Unix transport classification without broad `includes(":")` heuristics
+- NDJSON response correlation and queue-safe request serialization in client
+- fast-fail on malformed newline-delimited JSON-RPC response frames
 
-# With RTK Hybrid (50 tokens, 97.5% savings):
-$ git status --porcelain -b
-# Compressed: 51 files changed, 25 modified, 24 added, 2 untracked
-```
+Platform defaults:
+- Windows: TCP `127.0.0.1:9876`
+- Unix: Unix socket `/tmp/opencode-rtk.sock`
 
-## Features
+Environment variables:
+- `RTK_DAEMON_ADDR`: override daemon endpoint (socket path or TCP address)
+- `RTK_DAEMON_PATH`: override daemon binary path
+- `RTK_VERBOSE_STARTUP_LOGS=1`: enable verbose startup diagnostics in plugin spawn flow
 
-- 🚀 **Rust daemon** - Fast, no garbage collection pauses
-- 🔌 **OpenCode plugin** - Automatic integration
-- 📊 **SQLite tracking** - See how many tokens you've saved
-- 🛡️ **Process isolation** - RTK crash doesn't affect OpenCode
-- ⚡ **Low latency** - Unix socket (or TCP on Windows)
-- 📦 **26 command modules** - Git, npm, cargo, pytest, go, aws, and more
-- 🧪 **393 tests** - Well-tested and reliable
-- 🎯 **Hybrid optimization** - Pre-execution flags + post-execution filtering
-- 🔄 **DCP synergy** - Smaller messages = DCP keeps more context
-- 💾 **Tee mode** - Save original output on compression failure
+## JSON-RPC Methods
 
-## Installation
+Defined in `crates/rtk-daemon/src/protocol.rs`:
+- `compress`
+- `health`
+- `stats`
+- `shutdown`
+- `optimize`
+- `tee_save`
+- `tee_list`
+- `tee_read`
+- `tee_clear`
 
-### Option 1: Build from Source
+## Supported Command Modules
 
-```bash
-# Clone the repository
-git clone https://github.com/abdurrahmanregi/opencode-rtk
-cd opencode-rtk
+Core command modules are registered in `crates/rtk-core/src/commands/mod.rs`.
 
-# Build (requires Rust installed)
-cargo build --release
+Current module families include:
+- VCS and build tooling: `git`, `cargo`, `docker`, `go`, `golangci-lint`
+- JS/TS ecosystem: `npm`, `pnpm`, `eslint`, `tsc`, `next`, `playwright`, `prisma`, `vitest`
+- Python and test tooling: `pip`, `pytest`, `ruff`
+- network/data tools: `curl`, `wget`, `aws`, `psql`
+- file/search tools: `grep`, `diff`, `find`, `ls`, `read`
 
-# The binary will be at:
-# target/release/opencode-rtk (Unix)
-# target/release/opencode-rtk.exe (Windows)
-```
+Pre-execution flag mappings live in `crates/rtk-core/src/commands/pre_execution.rs`.
 
-### Option 2: Install Rust First (if you don't have it)
+## Build, Test, Lint
+
+From repo root:
 
 ```bash
-# Windows: Download from https://rustup.rs
-# Or run in PowerShell:
-winget install Rustlang.Rustup
+# Rust workspace
+cargo build
+cargo test
+cargo fmt -- --check
+cargo clippy
 
-# Unix/macOS:
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-## Quick Start
-
-### Step 1: Build the Daemon and Plugin
-
-```bash
-# Build Rust daemon
-cargo build --release
-
-# Build TypeScript plugin
+# Plugin
 cd plugin
 npm install
 npm run build
+npm run lint
+npm test
 ```
 
-### Step 2: Configure OpenCode
-
-Add to your project's `opencode.json`:
-
-```json
-{
-  "plugin": ["C:/Users/abdur/OneDrive/Work/opencode-rtk/plugin/src/index.ts"]
-}
-```
-
-### Step 3: Use OpenCode Normally
-
-The plugin will **automatically start the daemon** and compress command output!
-
-**Note:** The daemon auto-starts when OpenCode loads. No manual startup needed.
-
-## Supported Commands
-
-| Category | Commands | Typical Savings |
-|----------|----------|-----------------|
-| **Git** | status, diff, log, add, commit, push, checkout | 85-99% |
-| **npm/pnpm** | test, install, list, run | 70-95% |
-| **cargo** | test, build, clippy | 75-90% |
-| **pytest** | test runs | 90%+ |
-| **go** | test, build, vet | 75-90% |
-| **ESLint/TSC** | lint, compile | 80-85% |
-| **AWS CLI** | various commands | 80% |
-| **Docker** | ps, logs, images | 60-80% |
-
-### Full Command List
-
-See [PHASE2_SUMMARY.md](./PHASE2_SUMMARY.md) for complete list of 26 command modules and their specific optimizations.
-
----
-
-## DCP (Dynamic Context Pruning) Compatibility
-
-OpenCode-RTK is designed to work alongside [DCP](https://github.com/Opencode-DCP/opencode-dynamic-context-pruning) for maximum context efficiency.
-
-**How RTK + DCP Work Together:**
-
-| Scenario                            | Without RTK  | With RTK Only      | With RTK + DCP      |
-| ------------------------------------ | --------------- | ------------------ | -------------------- |
-| 50 turns of tool calls              | ~75,000 tokens  | ~15,000 tokens (80% savings)  | ~15,000 tokens, 2x more turns  |
-| Large `git status` (2000 tokens)    | 2000 tokens    | 200 tokens (90% savings)     | 200 tokens, DCP keeps it longer |
-| Accumulated session                | Hits 200k at ~15 turns | Hits 200k at ~75 turns    | Hits 200k at ~150+ turns  |
-
-**Key Benefits:**
-- Smaller compressed messages = DCP can keep more turns in context
-- DCP can prune less aggressively (preserve more context)
-- Combined = 10x longer sessions before hitting token limits
-
-**Example:**
-```
-Without RTK + DCP:  Session ends after ~15 turns (200k tokens)
-With RTK + DCP:     Session lasts ~150+ turns (same 200k token budget)
-```
-
-**Note:** DCP and RTK are complementary - they address different optimization layers (context pruning vs output compression).
-| **npm/pnpm** | test, install, list, run | 70-95% |
-| **cargo** | test, build, clippy | 75-90% |
-| **pytest** | test runs | 90%+ |
-| **go** | test, build, vet | 75-90% |
-| **ESLint/TSC** | lint, compile | 80-85% |
-| **AWS CLI** | various commands | 80% |
-| **Docker** | ps, logs, images | 60-80% |
-
-...and more! See [PHASE2_SUMMARY.md](./PHASE2_SUMMARY.md) for the full list.
-
-## How It Works
-
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   OpenCode  │────▶│   Plugin    │────▶│ RTK Daemon  │
-│   (Go CLI)  │     │ (TypeScript)│     │   (Rust)    │
-└─────────────┘     └─────────────┘     └─────────────┘
-                        │                      │
-                        │ Auto-start           │ Unix/TCP
-                        └──────▶──────────────▶
-                              Spawned process
-                                                │
-                                                ▼
-                                         ┌─────────────┐
-                                         │ Compressed  │
-                                         │   Output    │
-                                         └─────────────┘
-```
-
-1. OpenCode loads plugin → Plugin auto-starts daemon if not running
-2. You run a command in OpenCode
-3. Plugin captures the output
-4. Sends to RTK daemon via socket
-5. Daemon compresses based on command type
-6. Compressed output goes to LLM
-
-## Project Structure
-
-```
-opencode-rtk/
-├── crates/
-│   ├── rtk-core/      # Core library (26 command modules)
-│   ├── rtk-daemon/    # Socket daemon server
-│   └── rtk-cli/       # Optional CLI tool
-├── plugin/            # TypeScript plugin for OpenCode
-├── PHASE1_SUMMARY.md  # Phase 1 completion details
-├── PHASE2_SUMMARY.md  # Phase 2 completion details
-├── PHASE3_5_SUMMARY.md # Phase 3.5 completion details
-├── CODE_REVIEW_SUMMARY.md  # Code audit results
-├── ARCHITECTURE.md    # System design
-└── AGENTS.md          # Build/test commands
-```
-
-## Development
-
-### Common Commands
-
-```bash
-# Build everything
-cargo build
-
-# Build optimized release
-cargo build --release
-
-# Run all tests
-cargo test
-
-# Run tests for one crate
-cargo test -p rtk-core
-
-# Check for code issues
-cargo clippy
-
-# Format code
-cargo fmt
-```
-
-### Running Tests
-
-```bash
-# All tests
-cargo test
-
-# With output visible
-cargo test -- --nocapture
-
-# Specific test
-cargo test test_git_status
-```
-
-### Viewing Stats
-
-```bash
-# Using CLI
-cargo run --bin rtk-cli -- stats
-
-# Or check the database directly
-sqlite3 ~/.local/share/opencode-rtk/history.db "SELECT * FROM commands LIMIT 10"
-```
+Note: plugin tests run through Bun (`npm test` -> `bun test`).
 
 ## Configuration
 
-Config file location: `~/.config/opencode-rtk/config.toml`
+Primary config file:
+- `~/.config/opencode-rtk/config.toml`
 
-```toml
-[general]
-enable_tracking = true    # Save token savings to SQLite
+Key sections:
+- `[general]`: tracking and pre-execution toggles
+- `[daemon]`: socket path / TCP address / runtime limits
+- `[tee]`: tee save behavior and retention
+- `[llm]`: optional LLM fallback configuration (feature-dependent)
 
-[daemon]
-socket_path = "/tmp/opencode-rtk.sock"  # Unix
-# tcp_address = "127.0.0.1:9876"        # Windows (optional)
-timeout_seconds = 5
-max_connections = 100
-
-[tracking]
-retention_days = 90       # Delete old records after 90 days
-```
-
-## Status
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| Phase 1 | Core infrastructure | ✅ Complete |
-| Phase 2 | Command modules | ✅ Complete |
-| Code Review | Bug fixes | ✅ Complete |
-| Phase 3.5 | Pre-execution + Tee mode | ✅ Complete |
-| Phase 4 | User-defined modules | 🔜 Next |
-
-## Documentation
-
-- **[ARCHITECTURE.md](./ARCHITECTURE.md)** - How the system is designed
-- **[AGENTS.md](./AGENTS.md)** - Build commands and code style guide
-- **[PHASE1_SUMMARY.md](./PHASE1_SUMMARY.md)** - Core infrastructure details
-- **[PHASE2_SUMMARY.md](./PHASE2_SUMMARY.md)** - Command module details
-- **[PHASE3_5_SUMMARY.md](./PHASE3_5_SUMMARY.md)** - Pre-execution and tee mode
-- **[CODE_REVIEW_SUMMARY.md](./CODE_REVIEW_SUMMARY.md)** - What was audited and fixed
+Config source: `crates/rtk-core/src/config/mod.rs`.
 
 ## Troubleshooting
 
-### "Plugin not compressing"
+### Windows: startup or build lock issues
 
-1. Check plugin path in `opencode.json` is correct
-2. Rebuild plugin: `cd plugin && npm run build`
-3. Check for errors in console - daemon auto-starts on plugin load
-4. On Windows, verify port 9876 is not in use: `netstat -an | findstr 9876`
+If startup fails repeatedly or `cargo build --release` returns access denied:
 
-### "Daemon failed to start"
-
-1. Verify `opencode-rtk` binary is in PATH or use full path
-2. Check logs for specific error messages
-3. On Windows: Run daemon manually to see startup errors
-4. On Unix: Check permissions on `/tmp/opencode-rtk.sock`
-
-### "Build fails"
-
-Make sure you have Rust installed:
 ```bash
-rustc --version
-cargo --version
+netstat -ano | findstr :9876
+taskkill /F /PID <pid>
+cargo build --release
+cd plugin && npm run build
 ```
 
-### "nul or NUL files created in project"
+Then restart OpenCode.
 
-If you see `nul` or `NUL` files appearing in your project directory, this is a Git Bash + Windows issue.
+### Healthy startup log pattern
 
-**Cause:** Running `command 2>nul` in Git Bash creates files instead of redirecting to Windows null device.
+A normal cold start may show:
+- initial `ECONNREFUSED` while daemon is not running
+- daemon spawn + short delay
+- `waitForDaemon` retries
+- eventual health success (`status: "ok"`)
 
-**Solution:**
-```bash
-# Delete the files (Windows del may fail)
-rm -f ./nul ./NUL
+## Documentation
 
-# Use /dev/null instead of nul in bash
-# ❌ Bad: command 2>nul
-# ✅ Good: command 2>/dev/null
-```
-
-## License
-```bash
-rustc --version
-cargo --version
-```
+- `ARCHITECTURE.md`: full component and runtime architecture
+- `AGENTS.md`: contributor/agent operating guide
+- `CHANGELOG.md`: release history
 
 ## License
 
 MIT
-
-## Acknowledgments
-
-- [rtk](https://github.com/rtk-ai/rtk) - Reference implementation
-- [OpenCode](https://opencode.ai) - CLI tool this integrates with
