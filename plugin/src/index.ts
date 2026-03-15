@@ -5,6 +5,7 @@ import { onToolExecuteAfter } from "./hooks/tool-after";
 import { onSessionIdle } from "./hooks/session";
 import { startCleanupTimer } from "./state";
 import { isDaemonRunning, autoStartDaemon } from "./spawn";
+import type { PostExecutionCompressionMode, PreExecutionMode } from "./types";
 
 import * as os from "os";
 import * as path from "path";
@@ -38,6 +39,9 @@ const RTK_BINARY = process.env.RTK_DAEMON_PATH ||
 const MAX_RESTARTS_PER_SESSION = 3;
 const FAILED_HEALTH_RECHECK_MS = 1000;
 const HEALTHY_HEALTH_RECHECK_MS = 1500;
+const PRE_EXECUTION_MODE: PreExecutionMode = resolvePreExecutionMode();
+const POST_EXECUTION_COMPRESSION_MODE: PostExecutionCompressionMode =
+  resolvePostExecutionCompressionMode();
 
 let lastHealthCheckTime = 0;
 let lastHealthCheckResult = false;
@@ -124,6 +128,43 @@ async function ensureDaemonRunning(
 
 export { ensureDaemonRunning };
 
+function resolvePreExecutionMode(): PreExecutionMode {
+  const enabled = process.env.RTK_ENABLE_PRE_EXECUTION_FLAGS;
+  if (!enabled) {
+    return "off";
+  }
+
+  const normalized = enabled.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes"
+    ? "rewrite"
+    : "off";
+}
+
+function resolvePostExecutionCompressionMode(): PostExecutionCompressionMode {
+  const rawMode = process.env.RTK_POST_EXECUTION_MODE;
+  if (!rawMode) {
+    return "metadata_only";
+  }
+
+  const normalized = rawMode.trim().toLowerCase();
+  if (normalized === "off") {
+    return "off";
+  }
+
+  if (normalized === "metadata_only") {
+    return "metadata_only";
+  }
+
+  if (normalized === "replace" || normalized === "replace_output") {
+    return "replace_output";
+  }
+
+  console.warn(
+    `[RTK] Invalid RTK_POST_EXECUTION_MODE='${rawMode}', defaulting to metadata_only`
+  );
+  return "metadata_only";
+}
+
 export const RTKPlugin: Plugin = async ({ directory, worktree: _worktree }) => {
   const client = new RTKDaemonClient(RTK_SOCKET_PATH);
   
@@ -155,12 +196,18 @@ export const RTKPlugin: Plugin = async ({ directory, worktree: _worktree }) => {
   return {
     // Hook: Pre-tool execution
     "tool.execute.before": async (input, output) => {
-      await onToolExecuteBefore(input, output, client);
+      await onToolExecuteBefore(input, output, client, PRE_EXECUTION_MODE);
     },
     
     // Hook: Post-tool execution
     "tool.execute.after": async (input, output) => {
-      await onToolExecuteAfter(input, output, client, directory);
+      await onToolExecuteAfter(
+        input,
+        output,
+        client,
+        directory,
+        POST_EXECUTION_COMPRESSION_MODE
+      );
     },
     
     // Hook: Session complete

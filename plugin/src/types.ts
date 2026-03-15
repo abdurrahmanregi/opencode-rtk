@@ -55,6 +55,13 @@ export interface OptimizeResponse {
   skip_reason?: string;
 }
 
+export type PreExecutionMode = "off" | "rewrite";
+
+export type PostExecutionCompressionMode =
+  | "off"
+  | "metadata_only"
+  | "replace_output";
+
 /**
  * Request for tee_save method
  */

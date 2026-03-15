@@ -1,4 +1,5 @@
 import type {
+  PreExecutionMode,
   ToolExecuteBeforeInput,
   ToolExecuteBeforeOutput,
 } from "../types";
@@ -17,15 +18,20 @@ import { pendingCommands } from "../state";
 export async function onToolExecuteBefore(
   input: ToolExecuteBeforeInput,
   output: ToolExecuteBeforeOutput,
-  client: RTKDaemonClient
+  client: RTKDaemonClient,
+  mode: PreExecutionMode = "off"
 ): Promise<void> {
   // Only process bash commands
   if (input.tool !== "bash") {
     return;
   }
 
-  // Extract command from args
-  const originalCommand = (output.args?.command as string) || "";
+  const commandArg = output.args?.command;
+  if (typeof commandArg !== "string") {
+    return;
+  }
+
+  const originalCommand = commandArg;
 
   // Skip empty commands
   if (!originalCommand.trim()) {
@@ -33,15 +39,20 @@ export async function onToolExecuteBefore(
   }
 
   try {
-    // Call daemon to optimize command
-    const optimized = await client.optimizeCommand(originalCommand);
+    const optimized =
+      mode === "rewrite"
+        ? await client.optimizeCommand(originalCommand)
+        : {
+          original: originalCommand,
+          optimized: originalCommand,
+          flags_added: [] as string[],
+          skipped: true,
+          skip_reason: "pre-execution rewrite disabled",
+        };
 
-    // Modify command if optimization was applied
-    if (!optimized.skipped && optimized.flags_added.length > 0) {
+    if (mode === "rewrite" && !optimized.skipped && optimized.flags_added.length > 0) {
       output.args = output.args || {};
       output.args.command = optimized.optimized;
-
-      // Log optimization for debugging
       console.log(
         `[RTK] Pre-execution: Added flags [${optimized.flags_added.join(
           ", "
@@ -49,7 +60,6 @@ export async function onToolExecuteBefore(
       );
     }
 
-    // Store context for post-execution hook
     pendingCommands.set(input.callID, {
       originalCommand,
       optimizedCommand: optimized.optimized,

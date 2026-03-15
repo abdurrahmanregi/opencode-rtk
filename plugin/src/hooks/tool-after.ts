@@ -1,4 +1,5 @@
 import type {
+  PostExecutionCompressionMode,
   ToolExecuteAfterInput,
   ToolExecuteAfterOutput,
 } from "../types";
@@ -20,7 +21,8 @@ export async function onToolExecuteAfter(
   input: ToolExecuteAfterInput,
   output: ToolExecuteAfterOutput,
   client: RTKDaemonClient,
-  cwd: string
+  cwd: string,
+  mode: PostExecutionCompressionMode = "metadata_only"
 ): Promise<void> {
   if (input.tool !== "bash") {
     return;
@@ -37,13 +39,35 @@ export async function onToolExecuteAfter(
   }
 
   const command = context.optimizedCommand;
-  const rawOutput = output.output || "";
+  const rawOutput = typeof output.output === "string" ? output.output : "";
+
+  output.metadata = output.metadata || {};
+
+  if (mode === "off") {
+    output.metadata.rtk_mode = mode;
+    output.metadata.rtk_compression_skipped = true;
+    output.metadata.rtk_skip_reason = "post_execution_compression_disabled";
+    return;
+  }
+
+  const sensitiveReason = getSensitiveSkipReason(rawOutput);
+  if (sensitiveReason) {
+    output.metadata.rtk_mode = mode;
+    output.metadata.rtk_compression_skipped = true;
+    output.metadata.rtk_skip_reason = sensitiveReason;
+    attachPreExecutionMetadata(output, context);
+    return;
+  }
 
   // Skip if output is too large (>1MB)
   if (rawOutput.length > 1000000) {
     console.warn(
       `RTK: Skipping compression (output too large: ${rawOutput.length} bytes)`
     );
+    output.metadata.rtk_mode = mode;
+    output.metadata.rtk_compression_skipped = true;
+    output.metadata.rtk_skip_reason = "output_too_large";
+    attachPreExecutionMetadata(output, context);
     return;
   }
 
@@ -52,6 +76,10 @@ export async function onToolExecuteAfter(
 
   if (!isHealthy) {
     console.warn("RTK: Daemon not available, skipping compression");
+    output.metadata.rtk_mode = mode;
+    output.metadata.rtk_compression_skipped = true;
+    output.metadata.rtk_skip_reason = "daemon_unavailable";
+    attachPreExecutionMetadata(output, context);
     return;
   }
 
@@ -69,33 +97,33 @@ export async function onToolExecuteAfter(
 
     const response = await client.compress(request);
 
-    // Only replace if we actually saved tokens
-    if (response.saved_tokens > 0) {
+    output.metadata.rtk_mode = mode;
+    output.metadata.rtk_strategy = response.strategy;
+    output.metadata.rtk_module = response.module;
+    output.metadata.rtk_saved_tokens = response.saved_tokens;
+    output.metadata.rtk_savings_pct = response.savings_pct;
+
+    if (mode === "replace_output" && response.saved_tokens > 0) {
       output.output = response.compressed;
-
-      // Add metadata
-      output.metadata = output.metadata || {};
       output.metadata.rtk_compressed = true;
-      output.metadata.rtk_strategy = response.strategy;
-      output.metadata.rtk_module = response.module;
-      output.metadata.rtk_saved_tokens = response.saved_tokens;
-      output.metadata.rtk_savings_pct = response.savings_pct;
-
-      // Add pre-execution metadata if flags were added
-      if (context.flagsAdded && context.flagsAdded.length > 0) {
-        output.metadata.rtk_pre_execution_flags = context.flagsAdded;
-        output.metadata.rtk_original_command = context.originalCommand;
-      }
-
-      // Log savings
+      output.metadata.rtk_output_replaced = true;
       console.log(
         `📊 RTK: Saved ${response.saved_tokens} tokens (${response.savings_pct.toFixed(
           1
         )}%) using ${response.strategy}`
       );
+    } else {
+      output.metadata.rtk_compressed = false;
+      output.metadata.rtk_output_replaced = false;
     }
+
+    attachPreExecutionMetadata(output, context);
   } catch (error) {
     console.error("RTK: Compression failed:", error);
+    output.metadata.rtk_compression_failed = true;
+    output.metadata.rtk_mode = mode;
+    output.metadata.rtk_skip_reason = "compression_error";
+    attachPreExecutionMetadata(output, context);
 
     // Save to tee file on failure (if enabled)
     try {
@@ -107,12 +135,47 @@ export async function onToolExecuteAfter(
         `[RTK] Compression failed, saved original output to: ${teeResult.path}`
       );
 
-      // Add tee path to metadata
-      output.metadata = output.metadata || {};
       output.metadata.rtk_tee_path = teeResult.path;
       output.metadata.rtk_compression_failed = true;
     } catch (teeError) {
       console.error("[RTK] Failed to save tee file:", teeError);
     }
+  }
+}
+
+export function getSensitiveSkipReason(rawOutput: string): string | null {
+  if (rawOutput.includes("{{") || rawOutput.includes("}}")) {
+    return "template_markers_detected";
+  }
+
+  if (rawOutput.includes("```")) {
+    return "markdown_code_fence_detected";
+  }
+
+  if (/<details[\s>]/i.test(rawOutput) || /<summary[\s>]/i.test(rawOutput)) {
+    return "html_details_block_detected";
+  }
+
+  if (/(^|\n)\s*\|.+\|\s*\n\s*\|[-:| ]+\|/m.test(rawOutput)) {
+    return "markdown_table_detected";
+  }
+
+  return null;
+}
+
+function attachPreExecutionMetadata(
+  output: ToolExecuteAfterOutput,
+  context: {
+    originalCommand: string;
+    flagsAdded: string[];
+  }
+): void {
+  if (!output.metadata) {
+    output.metadata = {};
+  }
+
+  if (context.flagsAdded.length > 0) {
+    output.metadata.rtk_pre_execution_flags = context.flagsAdded;
+    output.metadata.rtk_original_command = context.originalCommand;
   }
 }
