@@ -1,4 +1,5 @@
 import type {
+  ModelRuntimePolicy,
   PostExecutionCompressionMode,
   ToolExecuteAfterInput,
   ToolExecuteAfterOutput,
@@ -14,7 +15,7 @@ import { ensureDaemonRunning } from "../index";
  * This hook:
  * 1. Retrieves context from pre-execution hook
  * 2. Calls daemon to compress output
- * 3. Replaces output if savings > 0
+ * 3. Replaces output when policy allows and daemon recommends
  * 4. On failure, saves to tee file if enabled
  */
 export async function onToolExecuteAfter(
@@ -22,11 +23,13 @@ export async function onToolExecuteAfter(
   output: ToolExecuteAfterOutput,
   client: RTKDaemonClient,
   cwd: string,
-  mode: PostExecutionCompressionMode = "metadata_only"
+  modelPolicy: ModelRuntimePolicy,
 ): Promise<void> {
   if (input.tool !== "bash") {
     return;
   }
+
+  const mode: PostExecutionCompressionMode = modelPolicy.postExecutionMode;
 
   // Retrieve context stored by tool-before hook and delete atomically
   // This uses the SAME Map instance as tool-before via shared state module
@@ -92,6 +95,11 @@ export async function onToolExecuteAfter(
         exit_code: output.metadata?.exitCode || 0,
         tool: input.tool,
         session_id: input.sessionID,
+        model_id: modelPolicy.modelId,
+        model_category: modelPolicy.modelCategory,
+        policy_mode: modelPolicy.postExecutionMode,
+        compression_aggressiveness: modelPolicy.compressionAggressiveness,
+        strip_reasoning: modelPolicy.stripReasoning,
       },
     };
 
@@ -103,7 +111,8 @@ export async function onToolExecuteAfter(
     output.metadata.rtk_saved_tokens = response.saved_tokens;
     output.metadata.rtk_savings_pct = response.savings_pct;
 
-    if (mode === "replace_output" && response.saved_tokens > 0) {
+    const replaceRecommended = response.replace_recommended ?? true;
+    if (mode === "replace_output" && response.saved_tokens > 0 && replaceRecommended) {
       output.output = response.compressed;
       output.metadata.rtk_compressed = true;
       output.metadata.rtk_output_replaced = true;

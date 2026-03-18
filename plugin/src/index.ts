@@ -5,7 +5,14 @@ import { onToolExecuteAfter } from "./hooks/tool-after";
 import { onSessionIdle } from "./hooks/session";
 import { startCleanupTimer } from "./state";
 import { isDaemonRunning, autoStartDaemon } from "./spawn";
-import type { PostExecutionCompressionMode, PreExecutionMode } from "./types";
+import {
+  resolveModelRuntimePolicy,
+} from "./model-detection";
+import type {
+  ModelRuntimePolicy,
+  PostExecutionCompressionMode,
+  PreExecutionMode,
+} from "./types";
 
 import * as os from "os";
 import * as path from "path";
@@ -40,8 +47,11 @@ const MAX_RESTARTS_PER_SESSION = 3;
 const FAILED_HEALTH_RECHECK_MS = 1000;
 const HEALTHY_HEALTH_RECHECK_MS = 1500;
 const PRE_EXECUTION_MODE: PreExecutionMode = resolvePreExecutionMode();
-const POST_EXECUTION_COMPRESSION_MODE: PostExecutionCompressionMode =
-  resolvePostExecutionCompressionMode();
+const EXPLICIT_POST_EXECUTION_MODE: PostExecutionCompressionMode | null =
+  resolveExplicitPostExecutionCompressionMode();
+const ACTIVE_MODEL_POLICY: ModelRuntimePolicy = resolveModelRuntimePolicy(
+  EXPLICIT_POST_EXECUTION_MODE,
+);
 
 let lastHealthCheckTime = 0;
 let lastHealthCheckResult = false;
@@ -140,10 +150,10 @@ function resolvePreExecutionMode(): PreExecutionMode {
     : "off";
 }
 
-function resolvePostExecutionCompressionMode(): PostExecutionCompressionMode {
+function resolveExplicitPostExecutionCompressionMode(): PostExecutionCompressionMode | null {
   const rawMode = process.env.RTK_POST_EXECUTION_MODE;
   if (!rawMode) {
-    return "metadata_only";
+    return null;
   }
 
   const normalized = rawMode.trim().toLowerCase();
@@ -201,14 +211,14 @@ export const RTKPlugin: Plugin = async ({ directory, worktree: _worktree }) => {
     
     // Hook: Post-tool execution
     "tool.execute.after": async (input, output) => {
-      await onToolExecuteAfter(
-        input,
-        output,
-        client,
-        directory,
-        POST_EXECUTION_COMPRESSION_MODE
-      );
-    },
+        await onToolExecuteAfter(
+          input,
+          output,
+          client,
+          directory,
+          ACTIVE_MODEL_POLICY
+        );
+      },
     
     // Hook: Session complete
     event: async ({ event }) => {

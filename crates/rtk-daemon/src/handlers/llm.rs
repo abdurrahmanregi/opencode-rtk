@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -52,9 +53,9 @@ struct Choice {
 
 #[derive(Debug, Deserialize)]
 struct MessageContent {
-    content: Option<String>,
+    content: Option<Value>,
     #[serde(default)]
-    reasoning: Option<String>,
+    reasoning: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +63,42 @@ struct Usage {
     prompt_tokens: usize,
     completion_tokens: usize,
     total_tokens: usize,
+}
+
+fn extract_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().filter_map(extract_text).collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+        Value::Object(map) => {
+            for key in ["text", "content", "output", "reasoning"] {
+                if let Some(candidate) = map.get(key).and_then(extract_text) {
+                    return Some(candidate);
+                }
+            }
+
+            let parts: Vec<String> = map.values().filter_map(extract_text).collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+        _ => None,
+    }
 }
 
 /// LLM compressor using OpenRouter API
@@ -85,7 +122,10 @@ impl LlmCompressor {
             debug!("LlmCompressor initialized with API key");
         } else {
             warn!("LlmCompressor initialized WITHOUT API key - LLM compression disabled");
-            warn!("Set {} env var or configure api_key_file in config", config.openrouter.api_key_env);
+            warn!(
+                "Set {} env var or configure api_key_file in config",
+                config.openrouter.api_key_env
+            );
         }
 
         Ok(Self {
@@ -134,7 +174,13 @@ impl LlmCompressor {
     }
 
     /// Compress output using LLM
-    pub async fn compress(&self, command: &str, output: &str, exit_code: i32) -> Result<String> {
+    pub async fn compress(
+        &self,
+        command: &str,
+        output: &str,
+        exit_code: i32,
+        strip_reasoning: bool,
+    ) -> Result<String> {
         let api_key = self
             .api_key
             .as_ref()
@@ -195,27 +241,58 @@ impl LlmCompressor {
         }
 
         // Get raw response text for debugging
-        let response_text = response.text().await
+        let response_text = response
+            .text()
+            .await
             .context("Failed to read OpenRouter response body")?;
-        debug!("OpenRouter response body: {}", &response_text[..response_text.len().min(500)]);
-        
-        let result: OpenRouterResponse = serde_json::from_str(&response_text)
-            .with_context(|| format!("Failed to parse OpenRouter response: {}", &response_text[..response_text.len().min(200)]))?;
+        debug!(
+            "OpenRouter response body: {}",
+            &response_text[..response_text.len().min(500)]
+        );
+
+        let result: OpenRouterResponse =
+            serde_json::from_str(&response_text).with_context(|| {
+                format!(
+                    "Failed to parse OpenRouter response: {}",
+                    &response_text[..response_text.len().min(200)]
+                )
+            })?;
 
         let compressed = result
             .choices
             .first()
             .map(|c| {
-                debug!("Content: {:?}, Reasoning: {:?}", c.message.content, c.message.reasoning);
-                c.message.content
+                debug!(
+                    "Content: {:?}, Reasoning: {:?}",
+                    c.message.content, c.message.reasoning
+                );
+
+                let content_text = c
+                    .message
+                    .content
                     .as_ref()
+                    .and_then(extract_text)
                     .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| c.message.reasoning.as_ref().map(|s| s.trim().to_string()))
-                    .unwrap_or_default()
+                    .filter(|s| !s.is_empty());
+
+                if let Some(content) = content_text {
+                    return content;
+                }
+
+                if strip_reasoning {
+                    String::new()
+                } else {
+                    c.message
+                        .reasoning
+                        .as_ref()
+                        .and_then(extract_text)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_default()
+                }
             })
             .unwrap_or_default();
-        
+
         debug!("Compressed output: '{}'", compressed);
 
         // Warn if LLM returned empty output
@@ -237,24 +314,55 @@ impl LlmCompressor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_compressor_without_api_key() {
         // Ensure env var is not set (test isolation)
-        std::env::remove_var("OPENROUTER_API_KEY");
+        std::env::remove_var("RTK_TEST_OPENROUTER_API_KEY");
         let mut config = rtk_core::config::LlmConfig::default();
         config.enabled = true;
+        config.openrouter.api_key_env = "RTK_TEST_OPENROUTER_API_KEY".to_string();
         let compressor = LlmCompressor::new(config).unwrap();
         assert!(!compressor.is_available());
     }
 
     #[test]
     fn test_compressor_with_env_key() {
-        std::env::set_var("OPENROUTER_API_KEY", "test-key");
+        std::env::set_var("RTK_TEST_OPENROUTER_API_KEY", "test-key");
         let mut config = rtk_core::config::LlmConfig::default();
         config.enabled = true;
+        config.openrouter.api_key_env = "RTK_TEST_OPENROUTER_API_KEY".to_string();
         let compressor = LlmCompressor::new(config).unwrap();
         assert!(compressor.is_available());
-        std::env::remove_var("OPENROUTER_API_KEY");
+        std::env::remove_var("RTK_TEST_OPENROUTER_API_KEY");
+    }
+
+    #[test]
+    fn test_extract_text_from_string_and_array() {
+        assert_eq!(
+            extract_text(&json!("final output")),
+            Some("final output".to_string())
+        );
+        assert_eq!(
+            extract_text(&json!(["one", "two"])),
+            Some("one\ntwo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_text_from_object_variants() {
+        assert_eq!(
+            extract_text(&json!({"text": "done"})),
+            Some("done".to_string())
+        );
+        assert_eq!(
+            extract_text(&json!({"content": [{"text": "a"}, {"text": "b"}]})),
+            Some("a\nb".to_string())
+        );
+        assert_eq!(
+            extract_text(&json!({"reasoning": "chain", "other": "ignored"})),
+            Some("chain".to_string())
+        );
     }
 }

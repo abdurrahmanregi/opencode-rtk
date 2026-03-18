@@ -55,6 +55,12 @@ Environment variables:
 - `RTK_VERBOSE_STARTUP_LOGS=1`: enable verbose startup diagnostics in plugin spawn flow
 - `RTK_ENABLE_PRE_EXECUTION_FLAGS=1`: enable pre-exec command rewrite mode (default: off)
 - `RTK_POST_EXECUTION_MODE`: `off` | `metadata_only` (default) | `replace_output`
+- `OPENROUTER_MODEL`: choose OpenRouter model (for example `meta-llama/llama-3.1-8b-instruct` or `openai/gpt-oss-safeguard-20b`)
+- `RTK_ACTIVE_MODEL`: plugin-side model override for policy detection
+- `RTK_MODEL_CATEGORY`: override auto category (`reasoning` | `instruct` | `compact`)
+- `RTK_MODEL_POLICY_MODE`: override auto post-exec mode (`off` | `metadata_only` | `replace_output`)
+- `RTK_COMPRESSION_AGGRESSIVENESS`: override auto aggressiveness (`low` | `medium` | `high`)
+- `RTK_STRIP_REASONING`: force final-output-only behavior for reasoning-capable models (`true`/`false`)
 
 ## JSON-RPC Methods
 
@@ -113,6 +119,31 @@ Key sections:
 - `[daemon]`: socket path / TCP address / runtime limits
 - `[tee]`: tee save behavior and retention
 - `[llm]`: optional LLM fallback configuration (feature-dependent)
+
+Model-aware LLM policy (optional):
+
+```toml
+[llm.model_auto]
+enabled = true
+default_category = "instruct"
+default_policy_mode = "metadata_only"
+default_compression_aggressiveness = "medium"
+strip_reasoning = true
+
+[[llm.model_overrides]]
+match = "openai/gpt-oss*"
+category = "reasoning"
+policy_mode = "metadata_only"
+compression_aggressiveness = "low"
+strip_reasoning = true
+
+[[llm.model_overrides]]
+match = "meta-llama/llama-3.1-8b-instruct"
+category = "compact"
+policy_mode = "replace_output"
+compression_aggressiveness = "high"
+strip_reasoning = true
+```
 
 Config source: `crates/rtk-core/src/config/mod.rs`.
 

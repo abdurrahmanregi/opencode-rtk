@@ -1,5 +1,6 @@
 pub mod settings;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +145,101 @@ pub struct LlmConfig {
     /// OpenRouter specific settings
     #[serde(default)]
     pub openrouter: OpenRouterConfig,
+
+    /// Enable model-aware automatic policy selection
+    #[serde(default)]
+    pub model_auto: ModelAutoConfig,
+
+    /// Per-model override rules (first match wins)
+    #[serde(default)]
+    pub model_overrides: Vec<ModelOverride>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCategory {
+    Reasoning,
+    Instruct,
+    Compact,
+}
+
+impl Default for ModelCategory {
+    fn default() -> Self {
+        Self::Instruct
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PostExecutionPolicyMode {
+    Off,
+    MetadataOnly,
+    ReplaceOutput,
+}
+
+impl Default for PostExecutionPolicyMode {
+    fn default() -> Self {
+        Self::MetadataOnly
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionAggressiveness {
+    Low,
+    Medium,
+    High,
+}
+
+impl Default for CompressionAggressiveness {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelAutoConfig {
+    #[serde(default = "default_model_auto_enabled")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub default_category: ModelCategory,
+
+    #[serde(default)]
+    pub default_policy_mode: PostExecutionPolicyMode,
+
+    #[serde(default)]
+    pub default_compression_aggressiveness: CompressionAggressiveness,
+
+    #[serde(default = "default_strip_reasoning")]
+    pub strip_reasoning: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelOverride {
+    #[serde(rename = "match")]
+    pub match_pattern: String,
+
+    #[serde(default)]
+    pub category: Option<ModelCategory>,
+
+    #[serde(default)]
+    pub policy_mode: Option<PostExecutionPolicyMode>,
+
+    #[serde(default)]
+    pub compression_aggressiveness: Option<CompressionAggressiveness>,
+
+    #[serde(default)]
+    pub strip_reasoning: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRuntimePolicy {
+    pub model_id: String,
+    pub category: ModelCategory,
+    pub policy_mode: PostExecutionPolicyMode,
+    pub compression_aggressiveness: CompressionAggressiveness,
+    pub strip_reasoning: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +300,12 @@ fn default_model() -> String {
 fn default_openrouter_url() -> String {
     "https://openrouter.ai/api/v1".into()
 }
+fn default_model_auto_enabled() -> bool {
+    false
+}
+fn default_strip_reasoning() -> bool {
+    true
+}
 fn default_reasoning_effort() -> String {
     "low".into()
 }
@@ -224,7 +326,84 @@ impl Default for LlmConfig {
             timeout_ms: default_llm_timeout_ms(),
             temperature: default_temperature(),
             openrouter: OpenRouterConfig::default(),
+            model_auto: ModelAutoConfig::default(),
+            model_overrides: Vec::new(),
         }
+    }
+}
+
+impl Default for ModelAutoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_model_auto_enabled(),
+            default_category: ModelCategory::default(),
+            default_policy_mode: PostExecutionPolicyMode::default(),
+            default_compression_aggressiveness: CompressionAggressiveness::default(),
+            strip_reasoning: default_strip_reasoning(),
+        }
+    }
+}
+
+impl LlmConfig {
+    pub fn resolve_model_policy(&self, model_id: &str) -> Option<ModelRuntimePolicy> {
+        if !self.model_auto.enabled {
+            return None;
+        }
+
+        let normalized_model = model_id.trim();
+        let mut resolved = ModelRuntimePolicy {
+            model_id: normalized_model.to_string(),
+            category: self.model_auto.default_category,
+            policy_mode: self.model_auto.default_policy_mode,
+            compression_aggressiveness: self.model_auto.default_compression_aggressiveness,
+            strip_reasoning: self.model_auto.strip_reasoning,
+        };
+
+        for override_rule in &self.model_overrides {
+            let pattern = override_rule.match_pattern.trim();
+            if pattern.is_empty() {
+                continue;
+            }
+
+            if glob_matches(pattern, normalized_model) {
+                if let Some(category) = override_rule.category {
+                    resolved.category = category;
+                }
+                if let Some(policy_mode) = override_rule.policy_mode {
+                    resolved.policy_mode = policy_mode;
+                }
+                if let Some(aggressiveness) = override_rule.compression_aggressiveness {
+                    resolved.compression_aggressiveness = aggressiveness;
+                }
+                if let Some(strip_reasoning) = override_rule.strip_reasoning {
+                    resolved.strip_reasoning = strip_reasoning;
+                }
+                break;
+            }
+        }
+
+        Some(resolved)
+    }
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let mut regex_pattern = String::with_capacity(pattern.len() + 2);
+    regex_pattern.push('^');
+
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex_pattern.push_str(".*"),
+            '?' => regex_pattern.push('.'),
+            _ => regex_pattern.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+
+    regex_pattern.push('$');
+    let wrapped = format!("(?i:{regex_pattern})");
+
+    match Regex::new(&wrapped) {
+        Ok(regex) => regex.is_match(value),
+        Err(_) => false,
     }
 }
 
@@ -353,6 +532,8 @@ mod tests {
         assert_eq!(llm.timeout_ms, 2000);
         assert_eq!(llm.temperature, 0.3);
         assert_eq!(llm.provider_preference, vec!["groq", "together"]);
+        assert!(!llm.model_auto.enabled);
+        assert!(llm.model_overrides.is_empty());
     }
 
     #[test]
@@ -402,7 +583,23 @@ mod tests {
                 "api_key_env": "CUSTOM_API_KEY",
                 "model": "openai/gpt-4",
                 "reasoning_effort": "high"
-            }
+            },
+            "model_auto": {
+                "enabled": true,
+                "default_category": "instruct",
+                "default_policy_mode": "replace_output",
+                "default_compression_aggressiveness": "high",
+                "strip_reasoning": true
+            },
+            "model_overrides": [
+                {
+                    "match": "openai/gpt-oss*",
+                    "category": "reasoning",
+                    "policy_mode": "metadata_only",
+                    "compression_aggressiveness": "low",
+                    "strip_reasoning": false
+                }
+            ]
         }"#;
 
         let llm: LlmConfig = serde_json::from_str(json).unwrap();
@@ -414,6 +611,89 @@ mod tests {
         assert_eq!(llm.openrouter.api_key_env, "CUSTOM_API_KEY");
         assert_eq!(llm.openrouter.model, "openai/gpt-4");
         assert_eq!(llm.openrouter.reasoning_effort, "high");
+        assert!(llm.model_auto.enabled);
+        assert_eq!(
+            llm.model_auto.default_policy_mode,
+            PostExecutionPolicyMode::ReplaceOutput
+        );
+        assert_eq!(
+            llm.model_auto.default_compression_aggressiveness,
+            CompressionAggressiveness::High
+        );
+        assert_eq!(llm.model_overrides.len(), 1);
+        assert_eq!(llm.model_overrides[0].match_pattern, "openai/gpt-oss*");
+        assert_eq!(
+            llm.model_overrides[0].category,
+            Some(ModelCategory::Reasoning)
+        );
+    }
+
+    #[test]
+    fn test_glob_matches_wildcards_case_insensitive() {
+        assert!(glob_matches(
+            "openai/gpt-oss*",
+            "openai/gpt-oss-safeguard-20b"
+        ));
+        assert!(glob_matches(
+            "META-LLAMA/*",
+            "meta-llama/llama-3.1-8b-instruct"
+        ));
+        assert!(glob_matches(
+            "*/llama-3.?-8b-*",
+            "meta-llama/llama-3.1-8b-instruct"
+        ));
+        assert!(!glob_matches(
+            "openai/gpt-oss?",
+            "openai/gpt-oss-safeguard-20b"
+        ));
+    }
+
+    #[test]
+    fn test_resolve_model_policy_disabled() {
+        let mut llm = LlmConfig::default();
+        llm.model_auto.enabled = false;
+        assert!(llm
+            .resolve_model_policy("openai/gpt-oss-safeguard-20b")
+            .is_none());
+    }
+
+    #[test]
+    fn test_resolve_model_policy_default_and_override() {
+        let mut llm = LlmConfig::default();
+        llm.model_auto = ModelAutoConfig {
+            enabled: true,
+            default_category: ModelCategory::Instruct,
+            default_policy_mode: PostExecutionPolicyMode::MetadataOnly,
+            default_compression_aggressiveness: CompressionAggressiveness::Medium,
+            strip_reasoning: true,
+        };
+        llm.model_overrides = vec![ModelOverride {
+            match_pattern: "openai/gpt-oss*".to_string(),
+            category: Some(ModelCategory::Reasoning),
+            policy_mode: Some(PostExecutionPolicyMode::MetadataOnly),
+            compression_aggressiveness: Some(CompressionAggressiveness::Low),
+            strip_reasoning: Some(true),
+        }];
+
+        let overridden = llm
+            .resolve_model_policy("openai/gpt-oss-safeguard-20b")
+            .unwrap();
+        assert_eq!(overridden.category, ModelCategory::Reasoning);
+        assert_eq!(
+            overridden.compression_aggressiveness,
+            CompressionAggressiveness::Low
+        );
+        assert!(overridden.strip_reasoning);
+
+        let defaulted = llm
+            .resolve_model_policy("meta-llama/llama-3.1-8b-instruct")
+            .unwrap();
+        assert_eq!(defaulted.category, ModelCategory::Instruct);
+        assert_eq!(
+            defaulted.compression_aggressiveness,
+            CompressionAggressiveness::Medium
+        );
+        assert_eq!(defaulted.policy_mode, PostExecutionPolicyMode::MetadataOnly);
     }
 
     #[cfg(feature = "llm")]
