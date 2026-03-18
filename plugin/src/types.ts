@@ -6,6 +6,11 @@ export interface CompressRequest {
     exit_code?: number;
     tool?: string;
     session_id?: string;
+    model_id?: string;
+    model_category?: ModelCategory;
+    policy_mode?: PostExecutionCompressionMode;
+    compression_aggressiveness?: CompressionAggressiveness;
+    strip_reasoning?: boolean;
   };
 }
 
@@ -17,6 +22,7 @@ export interface CompressResponse {
   savings_pct: number;
   strategy: string;
   module: string;
+  replace_recommended?: boolean;
 }
 
 export interface StatsResponse {
@@ -61,6 +67,18 @@ export type PostExecutionCompressionMode =
   | "off"
   | "metadata_only"
   | "replace_output";
+
+export type ModelCategory = "reasoning" | "instruct" | "compact";
+
+export type CompressionAggressiveness = "low" | "medium" | "high";
+
+export interface ModelRuntimePolicy {
+  modelId: string;
+  modelCategory: ModelCategory;
+  postExecutionMode: PostExecutionCompressionMode;
+  compressionAggressiveness: CompressionAggressiveness;
+  stripReasoning: boolean;
+}
 
 /**
  * Request for tee_save method

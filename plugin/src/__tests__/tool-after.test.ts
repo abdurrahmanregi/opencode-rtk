@@ -4,7 +4,19 @@ import {
   onToolExecuteAfter,
 } from "../hooks/tool-after";
 import { pendingCommands } from "../state";
-import type { ToolExecuteAfterInput, ToolExecuteAfterOutput } from "../types";
+import type {
+  ModelRuntimePolicy,
+  ToolExecuteAfterInput,
+  ToolExecuteAfterOutput,
+} from "../types";
+
+const defaultPolicy: ModelRuntimePolicy = {
+  modelId: "meta-llama/llama-3.1-8b-instruct",
+  modelCategory: "instruct",
+  postExecutionMode: "metadata_only",
+  compressionAggressiveness: "high",
+  stripReasoning: true,
+};
 
 describe("getSensitiveSkipReason", () => {
   test("detects template markers", () => {
@@ -54,7 +66,10 @@ describe("onToolExecuteAfter", () => {
     });
 
     const mockClient = {};
-    await onToolExecuteAfter(input, output, mockClient as never, process.cwd(), "off");
+    await onToolExecuteAfter(input, output, mockClient as never, process.cwd(), {
+      ...defaultPolicy,
+      postExecutionMode: "off",
+    });
 
     expect(output.metadata?.rtk_mode).toBe("off");
     expect(output.metadata?.rtk_compression_skipped).toBe(true);
@@ -88,7 +103,7 @@ describe("onToolExecuteAfter", () => {
       output,
       mockClient as never,
       process.cwd(),
-      "metadata_only"
+      defaultPolicy
     );
 
     expect(output.metadata?.rtk_mode).toBe("metadata_only");

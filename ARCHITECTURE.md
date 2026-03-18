@@ -88,9 +88,10 @@ Primary files:
 1. Plugin retrieves pending context.
 2. Plugin enforces output guardrails (skips template/markdown-sensitive output).
 3. `ensureDaemonRunning(...)` checks health with throttled caching and restart path.
-4. Plugin default mode is `metadata_only`: requests daemon `compress` but preserves visible output.
-5. Optional `replace_output` mode rewrites output only if `saved_tokens > 0`.
-6. On compression failure, plugin attempts `tee_save` while preserving original output.
+4. Plugin resolves model-aware policy (`reasoning` / `instruct` / `compact`) and sends policy context to daemon.
+5. Plugin default mode is `metadata_only`: requests daemon `compress` but preserves visible output.
+6. Optional `replace_output` mode rewrites output only when daemon marks replacement as recommended.
+7. On compression failure, plugin attempts `tee_save` while preserving original output.
 
 ### D) `session.idle`
 

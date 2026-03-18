@@ -13,6 +13,11 @@ export interface CompressRequest {
     exit_code?: number;
     tool?: string;
     session_id?: string;
+    model_id?: string;
+    model_category?: "reasoning" | "instruct" | "compact";
+    policy_mode?: "off" | "metadata_only" | "replace_output";
+    compression_aggressiveness?: "low" | "medium" | "high";
+    strip_reasoning?: boolean;
   };
 }
 
@@ -24,6 +29,7 @@ export interface CompressResponse {
   savings_pct: number;
   strategy: string;
   module: string;
+  replace_recommended?: boolean;
 }
 
 export interface StatsResponse {
