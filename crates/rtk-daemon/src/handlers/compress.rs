@@ -168,8 +168,14 @@ fn should_recommend_replacement(
     policy_mode: PostExecutionPolicyMode,
     savings_pct: f64,
     aggressiveness: CompressionAggressiveness,
+    compressed_output: &str,
 ) -> bool {
     if policy_mode != PostExecutionPolicyMode::ReplaceOutput {
+        return false;
+    }
+
+    // Never replace with an empty string, even if "savings" are 100%
+    if compressed_output.trim().is_empty() {
         return false;
     }
 
@@ -298,6 +304,7 @@ pub async fn handle(params: Value, _config: &rtk_core::config::Config) -> Handle
         effective_policy.policy_mode,
         result.savings_pct,
         effective_policy.compression_aggressiveness,
+        &result.compressed,
     );
     if effective_policy.policy_mode == PostExecutionPolicyMode::ReplaceOutput
         && result.saved_tokens > 0
@@ -581,17 +588,20 @@ mod tests {
         assert!(!should_recommend_replacement(
             PostExecutionPolicyMode::MetadataOnly,
             99.0,
-            CompressionAggressiveness::High
+            CompressionAggressiveness::High,
+            "compressed",
         ));
         assert!(!should_recommend_replacement(
             PostExecutionPolicyMode::ReplaceOutput,
             4.0,
-            CompressionAggressiveness::Medium
+            CompressionAggressiveness::Medium,
+            "compressed",
         ));
         assert!(should_recommend_replacement(
             PostExecutionPolicyMode::ReplaceOutput,
             6.0,
-            CompressionAggressiveness::Medium
+            CompressionAggressiveness::Medium,
+            "compressed",
         ));
     }
 }

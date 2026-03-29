@@ -126,7 +126,7 @@ function parseBoolean(value: string | undefined): boolean | null {
 }
 
 function defaultModeForCategory(_category: ModelCategory): PostExecutionCompressionMode {
-  return "metadata_only";
+  return "replace_output";
 }
 
 function defaultAggressivenessForCategory(

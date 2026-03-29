@@ -181,12 +181,79 @@ async fn run() -> Result<ExitCode> {
             }
         }
         Commands::Stats { session } => {
-            eprintln!("Error: Stats not implemented in CLI mode.");
-            eprintln!("Hint: Use the daemon mode (rtk-daemon) for statistics.");
-            if let Some(s) = session {
-                eprintln!("Requested session: {}", s);
-            }
-            Ok(ExitCode::from(EXIT_NOT_IMPLEMENTED))
+            get_daemon_stats(session)?;
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
+
+/// Send a stats request to the daemon and print the results
+fn get_daemon_stats(session_id: Option<String>) -> Result<()> {
+    use std::net::SocketAddr;
+    
+    let addr: SocketAddr = DAEMON_ADDR.parse()
+        .context("Invalid daemon address")?;
+    let stream = TcpStream::connect_timeout(
+        &addr,
+        Duration::from_millis(CONNECT_TIMEOUT_MS),
+    ).context("Failed to connect to daemon. Is it running?")?;
+    
+    let mut reader = BufReader::new(stream.try_clone().context("Failed to clone stream")?);
+    let mut writer = stream;
+    
+    // Send stats request (JSON-RPC 2.0 format)
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "stats",
+        "id": 1,
+        "params": {
+            "session_id": session_id
+        }
+    });
+    
+    writer.write_all(format!("{}\n", request).as_bytes())
+        .context("Failed to send stats request")?;
+    writer.flush().context("Failed to flush request")?;
+    
+    // Read response
+    let mut response = String::new();
+    let bytes_read = reader.read_line(&mut response)
+        .context("Failed to read response from daemon")?;
+    
+    if bytes_read == 0 {
+        return Err(anyhow::anyhow!("Daemon closed connection without sending response"));
+    }
+    
+    // Parse response
+    let parsed: Value = serde_json::from_str(&response.trim())
+        .context("Failed to parse daemon response")?;
+    
+    // Check for error in response
+    if let Some(error) = parsed.get("error") {
+        let msg = error.get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        return Err(anyhow::anyhow!("Daemon returned error: {}", msg));
+    }
+    
+    if let Some(result) = parsed.get("result") {
+        if let Some(message) = result.get("message") {
+            println!("{}", message.as_str().unwrap_or("Unknown message"));
+            return Ok(());
+        }
+        
+        println!("\nCompression Statistics:");
+        println!("-----------------------");
+        println!("Command count:           {}", result.get("command_count").and_then(|v| v.as_i64()).unwrap_or(0));
+        println!("Total original tokens:   {}", result.get("total_original_tokens").and_then(|v| v.as_i64()).unwrap_or(0));
+        println!("Total compressed tokens: {}", result.get("total_compressed_tokens").and_then(|v| v.as_i64()).unwrap_or(0));
+        println!("Total saved tokens:      {}", result.get("total_saved_tokens").and_then(|v| v.as_i64()).unwrap_or(0));
+        println!("Overall savings:         {:.1}%", result.get("savings_pct").and_then(|v| v.as_f64()).unwrap_or(0.0));
+        println!();
+    } else {
+        eprintln!("Unexpected response format: {}", response);
+    }
+    
+    Ok(())
+}
+

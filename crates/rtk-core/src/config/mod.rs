@@ -179,7 +179,7 @@ pub enum PostExecutionPolicyMode {
 
 impl Default for PostExecutionPolicyMode {
     fn default() -> Self {
-        Self::MetadataOnly
+        Self::ReplaceOutput
     }
 }
 

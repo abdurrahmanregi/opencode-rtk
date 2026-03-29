@@ -295,9 +295,10 @@ impl LlmCompressor {
 
         debug!("Compressed output: '{}'", compressed);
 
-        // Warn if LLM returned empty output
+        // Error if LLM returned empty output
         if compressed.is_empty() {
-            warn!("LLM returned empty compressed output");
+            warn!("LLM returned empty compressed output - failing compression to allow fallback");
+            anyhow::bail!("LLM returned empty compressed output");
         }
 
         if let Some(usage) = result.usage {

@@ -153,7 +153,7 @@ function resolvePreExecutionMode(): PreExecutionMode {
 function resolveExplicitPostExecutionCompressionMode(): PostExecutionCompressionMode | null {
   const rawMode = process.env.RTK_POST_EXECUTION_MODE;
   if (!rawMode) {
-    return null;
+    return "replace_output"; // Default to replacing the output to actually save tokens!
   }
 
   const normalized = rawMode.trim().toLowerCase();
@@ -170,9 +170,9 @@ function resolveExplicitPostExecutionCompressionMode(): PostExecutionCompression
   }
 
   console.warn(
-    `[RTK] Invalid RTK_POST_EXECUTION_MODE='${rawMode}', defaulting to metadata_only`
+    `[RTK] Invalid RTK_POST_EXECUTION_MODE='${rawMode}', defaulting to replace_output`
   );
-  return "metadata_only";
+  return "replace_output";
 }
 
 export const RTKPlugin: Plugin = async ({ directory, worktree: _worktree }) => {
